@@ -1,0 +1,10 @@
+.venv
+weights
+__pycache__
+*.pyc
+.git
+docs
+*.md
+run.ps1
+run.sh
+test.sh

@@ -1,0 +1,210 @@
+# Model Guide
+
+This document covers each model used in the Photo AI Processing Service: what it does, available variants, configuration, and weight sources.
+
+## DDColor (Colorization)
+
+**Endpoint:** `POST /colorize`
+**Paper:** [DDColor: Towards Photo-Realistic Image Colorization via Dual Decoders](https://arxiv.org/abs/2212.11613)
+**Repository:** [github.com/piddnad/DDColor](https://github.com/piddnad/DDColor)
+
+DDColor is an automatic image colorization model using dual decoders — a pixel decoder and a color decoder with learned color queries. It produces natural, vivid colorization without requiring user hints.
+
+### Variants
+
+| Variant | Env value | Model size | Description |
+|---|---|---|---|
+| `modelscope` | `MODEL_COLORIZE=modelscope` | large | **Default.** Best overall quality. Trained on ModelScope dataset. |
+| `paper_tiny` | `MODEL_COLORIZE=paper_tiny` | tiny | Smaller and faster. From the original paper. |
+| `artistic` | `MODEL_COLORIZE=artistic` | large | Artistic style with more saturated colors. |
+
+### Parameters
+
+- **`render_factor`** (1-100, default 35): Controls the internal processing resolution. Higher values process at higher resolution, producing more detailed colorization but using more memory.
+
+### Weight Sources
+
+All DDColor weights are hosted on HuggingFace:
+
+| Variant | URL |
+|---|---|
+| `paper_tiny` | `huggingface.co/piddnad/DDColor-models/.../ddcolor_paper_tiny.pth` |
+| `modelscope` | `huggingface.co/piddnad/DDColor-models/.../ddcolor_modelscope.pth` |
+| `artistic` | `huggingface.co/piddnad/DDColor-models/.../ddcolor_artistic.pth` |
+
+### Technical Notes
+
+- Uses the `ddcolor` pip package with `ColorizationPipeline` for inference
+- Input size is fixed at 512×512 internally (render_factor controls this)
+- The model variant maps to model size: `paper_tiny` → `tiny`, `modelscope`/`artistic` → `large`
+
+---
+
+## NAFNet (Restoration)
+
+**Endpoint:** `POST /restore`
+**Paper:** [Simple Baselines for Image Restoration](https://arxiv.org/abs/2204.04676)
+**Repository:** [github.com/megvii-research/NAFNet](https://github.com/megvii-research/NAFNet)
+
+NAFNet (Nonlinear Activation Free Network) is an image restoration model that achieves state-of-the-art results with a simplified architecture. It removes the need for nonlinear activation functions in the main network body.
+
+### Variants
+
+| Variant | Env value | Trained on | Use case |
+|---|---|---|---|
+| `denoise` | `MODEL_RESTORE=denoise` | SIDD dataset | **Default.** Remove sensor noise from photos. Best for photos taken in low light or with high ISO. |
+| `deblur` | `MODEL_RESTORE=deblur` | GoPro dataset | Remove motion blur. Best for photos with camera shake or subject motion. |
+
+Both variants use `width=64` architecture.
+
+### Parameters
+
+- **`tile_size`** (>=0, default 0): Tile size for processing. `0` means no tiling (whole image at once). Set to 256 or 512 to reduce VRAM usage on large images.
+
+### Weight Sources
+
+NAFNet weights are hosted on Google Drive:
+
+| Variant | Filename | Source |
+|---|---|---|
+| `denoise` | `NAFNet-SIDD-width64.pth` | Google Drive |
+| `deblur` | `NAFNet-GoPro-width64.pth` | Google Drive |
+
+Google Drive URLs are resolved via `drive.usercontent.google.com` to bypass the virus-scan interstitial that Google shows for large files.
+
+### Technical Notes
+
+- Architecture (block counts, width) is inferred from checkpoint keys — no hard-coded config per variant
+- The wrapper counts encoder/decoder/middle blocks from key patterns like `encoders.0.1.conv1.weight`
+- Width is read from `intro.weight` shape
+
+---
+
+## CodeFormer (Face Restoration)
+
+**Endpoint:** `POST /face-restore`
+**Paper:** [Towards Robust Blind Face Restoration with Codebook Lookup Transformer](https://arxiv.org/abs/2206.11253)
+**Repository:** [github.com/sczhou/CodeFormer](https://github.com/sczhou/CodeFormer)
+
+CodeFormer is a face restoration model that uses a learned codebook (VQ-GAN) combined with a transformer to restore degraded faces. It handles severe degradation: blur, noise, compression artifacts, low resolution, and old photo damage.
+
+### Variants
+
+| Variant | Env value | Description |
+|---|---|---|
+| `v0.1` | `MODEL_FACE=v0.1` | **Default.** Only available variant. The v0.1.0 release weights. |
+
+### Parameters
+
+- **`fidelity`** (0.0-1.0, default 0.5): Controls the balance between restoration quality and input fidelity. The `w` parameter passed to the CodeFormer model.
+  - `0.0` = Maximum quality restoration (may change facial features)
+  - `0.5` = Balanced (default)
+  - `1.0` = Maximum fidelity to input (less restoration)
+- **`upscale`** (1-4, default 2): Upscale factor for the output image.
+
+### Face Detection Pipeline
+
+CodeFormer uses `facexlib` (RetinaFace) for face handling:
+
+1. **Detect** all faces using `retinaface_resnet50` (downloads ~100MB detection model on first use)
+2. **Align** each face to a canonical 512×512 crop using affine transform based on 5 facial landmarks
+3. **Restore** each face through the CodeFormer model
+4. **Preserve color**: Keep luminance from restored face, chrominance from original (prevents color artifacts on B&W/sepia inputs)
+5. **Paste back** into the original image using inverse affine transform
+
+If no faces are detected, the image is returned with a simple bicubic upscale.
+
+### Weight Sources
+
+| Variant | URL |
+|---|---|
+| `v0.1` | `github.com/sczhou/CodeFormer/releases/download/v0.1.0/codeformer.pth` |
+
+### Technical Notes
+
+- Architecture: `dim_embd=512`, `codebook_size=1024`, `n_head=8`, `n_layers=9`
+- Uses a VQ-GAN autoencoder (vendored in `models/archs/vqgan_arch.py`)
+- Face detection model (`retinaface_resnet50`) is downloaded separately by `facexlib` into `TORCH_HOME`
+
+---
+
+## Real-ESRGAN (Upscaling)
+
+**Endpoint:** `POST /upscale`
+**Paper:** [Real-ESRGAN: Training Real-World Blind Super-Resolution with Pure Synthetic Data](https://arxiv.org/abs/2107.10833)
+**Repository:** [github.com/xinntao/Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN)
+
+Real-ESRGAN is a super-resolution model that upscales images while adding realistic details. It uses the RRDBNet (Residual-in-Residual Dense Block Network) architecture and is trained on synthetic degradation to handle real-world low-quality images.
+
+### Variants
+
+| Variant | Env value | Scale | Description |
+|---|---|---|---|
+| `x4plus` | `MODEL_UPSCALE=x4plus` | 4× | **Default.** Best for real-world photos. |
+| `x4anime` | `MODEL_UPSCALE=x4anime` | 4× | Optimized for anime/illustration style images. Uses 6 RRDB blocks (vs 23 for x4plus). |
+| `x2plus` | `MODEL_UPSCALE=x2plus` | 2× | 2× upscale for photos. Uses pixel unshuffle preprocessing. |
+
+### Parameters
+
+- **`scale`** (1-8, default 4): Desired upscale factor. Note: the model has a native scale (2× or 4× depending on variant). If `scale` differs from the native scale, the output is the model's native scale.
+- **`tile_size`** (>=0, default 512): Tile size for tiled processing. `0` = no tiling. Default is 512 to prevent OOM on typical inputs.
+
+### Tiling
+
+Real-ESRGAN supports tiled processing for large images via `_tile_process()`:
+
+- Image is divided into a grid of `tile_size × tile_size` tiles
+- Each tile gets 10px overlap padding for seamless stitching
+- Tiles are processed independently, keeping VRAM bounded
+- Default tile size is 512 (set at the endpoint level)
+
+### Weight Sources
+
+All Real-ESRGAN weights are hosted on GitHub Releases:
+
+| Variant | URL |
+|---|---|
+| `x4plus` | `github.com/xinntao/Real-ESRGAN/releases/.../RealESRGAN_x4plus.pth` |
+| `x4anime` | `github.com/xinntao/Real-ESRGAN/releases/.../RealESRGAN_x4plus_anime_6B.pth` |
+| `x2plus` | `github.com/xinntao/Real-ESRGAN/releases/.../RealESRGAN_x2plus.pth` |
+
+### Technical Notes
+
+- Architecture (num_feat, num_block, num_grow_ch, scale) is inferred from checkpoint keys
+- Scale detection: `conv_first` input channels reveal the scale — 3 channels → 4× (raw input), 12 channels → 2× (pixel unshuffle ×2)
+- The `x4anime` variant uses 6 RRDB blocks; `x4plus` and `x2plus` use 23 blocks
+
+---
+
+## Weight Download & Caching
+
+### Download Process
+
+1. On startup, `ensure_model_exists(category, variant)` checks if the weight file exists at `/app/weights/<category>/<filename>`
+2. If missing, downloads from the URL in `MODEL_URLS`
+3. Downloads use `.part` file extension during transfer — if interrupted, the partial file is cleaned up
+4. After download, the file header is validated (rejects HTML responses that indicate failed downloads)
+5. Existing files are also validated on startup to catch previously corrupted downloads
+
+### Storage Layout
+
+```
+/app/weights/
+├── colorize/
+│   └── ddcolor_modelscope.pth
+├── restore/
+│   └── NAFNet-SIDD-width64.pth
+├── face/
+│   └── codeformer.pth
+├── upscale/
+│   └── RealESRGAN_x4plus.pth
+├── .torch/          # TORCH_HOME — facexlib detection model cache
+└── .huggingface/    # HF_HOME — HuggingFace cache
+```
+
+### Filename Resolution
+
+Most weight files use the filename from the download URL. For Google Drive URLs (which don't have meaningful filenames), `FILENAME_OVERRIDES` in `downloader.py` provides explicit names:
+
+- `restore/denoise` → `NAFNet-SIDD-width64.pth`
+- `restore/deblur` → `NAFNet-GoPro-width64.pth`

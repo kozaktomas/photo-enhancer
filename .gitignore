@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+
+# Model weights
+weights/
+
+# Test scripts & output
+test.ps1
+test.sh
+output/
+
+# Claude Code
+.claude/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Images
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.bmp
+
+# Environment variables
+.env

@@ -1,0 +1,23 @@
+services:
+  photo-ai:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - model-weights:/app/weights
+    environment:
+      - MODEL_COLORIZE=modelscope
+      - MODEL_RESTORE=denoise
+      - MODEL_FACE=v0.1
+      - MODEL_UPSCALE=x4plus
+      - FORCE_CPU=false
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  model-weights:
