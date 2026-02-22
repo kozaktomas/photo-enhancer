@@ -11,7 +11,13 @@ class TestHealthEndpoint:
 
     def test_health_lists_loaded_models(self, client):
         data = client.get("/health").json()
-        assert set(data["loaded_models"]) == {"colorize", "restore", "face", "upscale"}
+        assert set(data["loaded_models"]) == {
+            "colorize",
+            "restore",
+            "face",
+            "upscale",
+            "old_photo_restore",
+        }
 
 
 class TestMetricsEndpoint:
@@ -82,6 +88,68 @@ class TestUpscaleEndpoint:
         assert resp.headers["content-type"] == "image/jpeg"
 
 
+class TestOldPhotoRestoreEndpoint:
+    def test_success(self, client, sample_image_bytes):
+        resp = client.post(
+            "/v1/old-photo-restore",
+            files={"file": ("test.jpg", sample_image_bytes)},
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "image/png"
+
+    def test_params(self, client, sample_image_bytes):
+        resp = client.post(
+            "/v1/old-photo-restore?with_scratch=false&with_face=false&scratch_threshold=0.6",
+            files={"file": ("test.jpg", sample_image_bytes)},
+        )
+        assert resp.status_code == 200
+
+    def test_webp_output(self, client, sample_image_bytes):
+        resp = client.post(
+            "/v1/old-photo-restore?output_format=webp",
+            files={"file": ("test.jpg", sample_image_bytes)},
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "image/webp"
+
+    def test_invalid_image_returns_400(self, client):
+        resp = client.post(
+            "/v1/old-photo-restore",
+            files={"file": ("bad.jpg", b"not an image")},
+        )
+        assert resp.status_code == 400
+
+    def test_oversized_file_returns_413(self, client, oversized_file_bytes):
+        resp = client.post(
+            "/v1/old-photo-restore",
+            files={"file": ("big.jpg", oversized_file_bytes)},
+        )
+        assert resp.status_code == 413
+        assert "too large" in resp.json()["detail"].lower()
+
+    def test_503_when_model_missing(self, client, sample_image_bytes):
+        import main
+
+        main.model_registry.pop("old_photo_restore", None)
+        resp = client.post(
+            "/v1/old-photo-restore",
+            files={"file": ("test.jpg", sample_image_bytes)},
+        )
+        assert resp.status_code == 503
+        assert "not loaded" in resp.json()["detail"].lower()
+
+    def test_500_on_predict_exception(self, client, sample_image_bytes):
+        import main
+
+        main.model_registry["old_photo_restore"].predict.side_effect = RuntimeError("boom")
+        resp = client.post(
+            "/v1/old-photo-restore",
+            files={"file": ("test.jpg", sample_image_bytes)},
+        )
+        assert resp.status_code == 500
+        assert resp.json()["detail"] == "Internal processing error"
+
+
 class TestPipelineEndpoint:
     def test_success_all_steps(self, client, sample_image_bytes):
         resp = client.post("/v1/pipeline", files={"file": ("test.jpg", sample_image_bytes)})
@@ -94,6 +162,14 @@ class TestPipelineEndpoint:
         )
         assert resp.status_code == 400
         assert "at least one" in resp.json()["detail"].lower()
+
+    def test_old_photo_restore_in_pipeline(self, client, sample_image_bytes):
+        resp = client.post(
+            "/v1/pipeline?old_photo_restore=true&colorize=false&restore=false"
+            "&face_restore=false&upscale=false",
+            files={"file": ("test.jpg", sample_image_bytes)},
+        )
+        assert resp.status_code == 200
 
     def test_oversized_file_returns_413(self, client, oversized_file_bytes):
         resp = client.post("/v1/pipeline", files={"file": ("big.jpg", oversized_file_bytes)})
@@ -158,6 +234,15 @@ class TestLegacyRedirects:
         )
         assert resp.status_code == 307
         assert "/v1/upscale" in resp.headers["location"]
+
+    def test_old_photo_restore_redirect(self, client, sample_image_bytes):
+        resp = client.post(
+            "/old-photo-restore",
+            files={"file": ("test.jpg", sample_image_bytes)},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 307
+        assert "/v1/old-photo-restore" in resp.headers["location"]
 
     def test_pipeline_redirect(self, client, sample_image_bytes):
         resp = client.post(

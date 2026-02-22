@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
     build-essential \
+    cmake \
     && rm -rf /var/lib/apt/lists/*
 
 ENV TORCH_HOME=/app/weights/.torch \

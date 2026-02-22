@@ -14,6 +14,7 @@ Base URL: `http://localhost:8000`
 | `POST` | `/v1/restore` | Remove noise or blur |
 | `POST` | `/v1/face-restore` | Enhance and restore faces |
 | `POST` | `/v1/upscale` | Super-resolution upscaling |
+| `POST` | `/v1/old-photo-restore` | Restore old/damaged photos (scratch repair, global restoration, face enhancement) |
 | `POST` | `/v1/pipeline` | Run multiple enhancement steps in one request |
 
 Interactive docs are available at [`/docs`](http://localhost:8000/docs) (Swagger UI) and [`/redoc`](http://localhost:8000/redoc) (ReDoc).
@@ -38,7 +39,7 @@ curl http://localhost:8000/health
 {
   "status": "healthy",
   "device": "cuda",
-  "loaded_models": ["colorize", "restore", "face", "upscale"],
+  "loaded_models": ["colorize", "restore", "face", "upscale", "old_photo_restore"],
   "cuda_info": {
     "gpu_name": "NVIDIA GeForce RTX 3090",
     "vram_total_gb": 24.0,
@@ -301,9 +302,73 @@ with open("upscaled.webp", "wb") as f:
 
 ---
 
+## POST /v1/old-photo-restore
+
+Restore an old or damaged photo. Automatically detects and repairs scratches, performs global quality restoration via a VAE pipeline, and optionally enhances detected faces using a SPADE generator. Based on Microsoft's "Bringing Old Photos Back to Life" (CVPR 2020).
+
+**File size limit:** 32 MB maximum.
+
+### Parameters
+
+| Parameter | In | Type | Default | Constraints | Description |
+|---|---|---|---|---|---|
+| `file` | body (form) | file | required | max 32 MB | Input image (JPEG, PNG, WebP, etc.) |
+| `with_scratch` | query | bool | `true` | — | Enable automatic scratch detection and repair |
+| `with_face` | query | bool | `true` | — | Enable face enhancement via SPADE generator |
+| `scratch_threshold` | query | float | `0.4` | 0.0-1.0 | Sensitivity for scratch detection. Lower values detect more scratches. |
+| `output_format` | query | string | `png` | `png`, `jpg`, `jpeg`, `webp` | Output image format |
+
+### Examples
+
+**curl:**
+
+```bash
+# Basic usage — full pipeline (scratch detection + global restore + face enhance)
+curl -X POST http://localhost:8000/v1/old-photo-restore \
+  -F "file=@old_photo.jpg" \
+  -o restored.png
+
+# Without scratch detection (for photos without physical damage)
+curl -X POST "http://localhost:8000/v1/old-photo-restore?with_scratch=false" \
+  -F "file=@old_photo.jpg" \
+  -o restored.png
+
+# Adjust scratch sensitivity
+curl -X POST "http://localhost:8000/v1/old-photo-restore?scratch_threshold=0.6&output_format=webp" \
+  -F "file=@old_photo.jpg" \
+  -o restored.webp
+```
+
+**Python (requests):**
+
+```python
+import requests
+
+with open("old_photo.jpg", "rb") as f:
+    resp = requests.post(
+        "http://localhost:8000/v1/old-photo-restore",
+        files={"file": f},
+        params={"with_scratch": True, "scratch_threshold": 0.4},
+    )
+
+resp.raise_for_status()
+with open("restored.png", "wb") as f:
+    f.write(resp.content)
+```
+
+### Response
+
+- **200**: Processed image binary (Content-Type matches `output_format`)
+- **400**: Invalid image or parameter
+- **413**: File too large (exceeds 32 MB)
+- **500**: Processing error
+- **503**: Old photo restoration model not loaded
+
+---
+
 ## POST /v1/pipeline
 
-Run multiple enhancement steps in a single request. Pipeline order: colorize -> restore -> upscale -> resize -> face restore.
+Run multiple enhancement steps in a single request. Pipeline order: old_photo_restore -> colorize -> restore -> upscale -> resize -> face restore.
 
 **File size limit:** 32 MB maximum.
 
@@ -312,12 +377,15 @@ Run multiple enhancement steps in a single request. Pipeline order: colorize -> 
 | Parameter | In | Type | Default | Constraints | Description |
 |---|---|---|---|---|---|
 | `file` | body (form) | file | required | max 32 MB | Input image |
+| `old_photo_restore` | query | bool | `false` | — | Enable old photo restoration step (runs first) |
 | `colorize` | query | bool | `true` | — | Enable colorization step |
 | `restore` | query | bool | `true` | — | Enable restoration step |
 | `face_restore` | query | bool | `true` | — | Enable face restoration step |
 | `upscale` | query | bool | `true` | — | Enable upscale step |
 | `width` | query | int | `2400` | >= 1 | Target output width |
 | `height` | query | int | `2400` | >= 1 | Target output height |
+| `with_scratch` | query | bool | `true` | — | Enable scratch detection in old photo restore |
+| `scratch_threshold` | query | float | `0.4` | 0.0-1.0 | Scratch detection sensitivity |
 | `render_factor` | query | int | `35` | 1-100 | Colorization intensity |
 | `restore_tile_size` | query | int | `0` | >= 0 | Tile size for restoration |
 | `fidelity` | query | float | `0.7` | 0.0-1.0 | Face restoration fidelity |
@@ -373,6 +441,7 @@ Common error messages:
 | 503 | `Restoration model not loaded` | NAFNet failed to load at startup |
 | 503 | `Face restoration model not loaded` | CodeFormer failed to load at startup |
 | 503 | `Upscale model not loaded` | Real-ESRGAN failed to load at startup |
+| 503 | `Old photo restoration model not loaded` | Old Photo Restore failed to load at startup |
 | 500 | `Internal processing error` | Unexpected exception (see server logs) |
 
 ## Output Formats

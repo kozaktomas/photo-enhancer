@@ -10,6 +10,7 @@ services:
       - MODEL_RESTORE=denoise
       - MODEL_FACE=v0.1
       - MODEL_UPSCALE=x4plus
+      - MODEL_OLD_PHOTO=v1
       - FORCE_CPU=false
     deploy:
       resources:

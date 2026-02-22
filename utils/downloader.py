@@ -26,6 +26,19 @@ MODEL_URLS: dict[str, dict[str, str]] = {
     },
 }
 
+MODEL_URLS_MULTI: dict[str, dict[str, dict[str, str]]] = {
+    "old_photo_restore": {
+        "v1": {
+            "scratch_detection.pt": "https://huggingface.co/databuzzword/bringing-old-photos-back-to-life/resolve/main/Global/checkpoints/detection/FT_Epoch_latest.pt",
+            "vae_a_encoder.pth": "https://huggingface.co/databuzzword/bringing-old-photos-back-to-life/resolve/main/Global/checkpoints/restoration/VAE_A_quality/latest_net_G.pth",
+            "vae_b_decoder.pth": "https://huggingface.co/databuzzword/bringing-old-photos-back-to-life/resolve/main/Global/checkpoints/restoration/VAE_B_scratch/latest_net_G.pth",
+            "mapping_net.pth": "https://huggingface.co/databuzzword/bringing-old-photos-back-to-life/resolve/main/Global/checkpoints/restoration/mapping_scratch/latest_net_mapping_net.pth",
+            "face_enhance_gen.pth": "https://huggingface.co/databuzzword/bringing-old-photos-back-to-life/resolve/main/Face_Enhancement/checkpoints/Setting_9_epoch_100/latest_net_G.pth",
+            "shape_predictor_68_face_landmarks.dat": "https://huggingface.co/databuzzword/bringing-old-photos-back-to-life/resolve/main/Face_Detection/shape_predictor_68_face_landmarks.dat",
+        },
+    },
+}
+
 FILENAME_OVERRIDES: dict[str, dict[str, str]] = {
     "restore": {
         "denoise": "NAFNet-SIDD-width64.pth",
@@ -172,3 +185,67 @@ def ensure_model_exists(
         raise
 
     return str(dest_path)
+
+
+def ensure_model_files_exist(
+    category: str,
+    variant: str,
+    weights_dir: str = os.environ.get("WEIGHTS_DIR", "/app/weights"),
+) -> str:
+    """Ensure all weight files for a multi-file model exist on disk.
+
+    Downloads any missing files from the URLs registered in ``MODEL_URLS_MULTI``.
+
+    Args:
+        category: Model category (e.g. ``"old_photo_restore"``).
+        variant: Variant name within the category.
+        weights_dir: Root directory for weight storage.
+
+    Returns:
+        Absolute path to the directory containing the weight files.
+
+    Raises:
+        ValueError: If the category or variant is unknown.
+        RuntimeError: If a download produces a corrupt (HTML) file.
+    """
+    if category not in MODEL_URLS_MULTI:
+        raise ValueError(f"Unknown multi-file model category: {category}")
+    variants = MODEL_URLS_MULTI[category]
+    if variant not in variants:
+        raise ValueError(
+            f"Unknown variant '{variant}' for category '{category}'. "
+            f"Available: {list(variants.keys())}"
+        )
+
+    file_urls = variants[variant]
+    dest_dir = Path(weights_dir) / category
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    for filename, url in file_urls.items():
+        dest_path = dest_dir / filename
+        if dest_path.exists():
+            with open(dest_path, "rb") as f:
+                header = f.read(16)
+            if header.startswith(b"<") or header.startswith(b"<!"):
+                logger.warning(
+                    "Existing file %s is HTML (corrupt download), re-downloading",
+                    dest_path,
+                )
+                dest_path.unlink()
+            else:
+                logger.info("Model file already exists: %s", dest_path)
+                continue
+
+        part_path = dest_path.with_suffix(dest_path.suffix + ".part")
+        logger.info("Downloading %s/%s/%s from %s ...", category, variant, filename, url)
+
+        try:
+            _download_file(url, dest_path, part_path, category, f"{variant}/{filename}")
+            os.rename(part_path, dest_path)
+            logger.info("Saved model file to %s", dest_path)
+        except Exception:
+            if part_path.exists():
+                part_path.unlink()
+            raise
+
+    return str(dest_dir)

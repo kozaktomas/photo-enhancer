@@ -7,13 +7,16 @@ photo-enhancer/
 ├── main.py                  # FastAPI app, v1 router, endpoints, middleware, model lifecycle
 ├── models/
 │   ├── __init__.py
-│   ├── wrappers.py          # Model wrapper classes (DDColor, NAFNet, CodeFormer, RealESRGAN)
+│   ├── wrappers.py          # Model wrapper classes (DDColor, NAFNet, CodeFormer, RealESRGAN, OldPhotoRestore)
 │   └── archs/               # Vendored PyTorch architecture definitions
 │       ├── __init__.py
 │       ├── rrdbnet_arch.py   #   RRDBNet (Real-ESRGAN)
 │       ├── nafnet_arch.py    #   NAFNet
 │       ├── codeformer_arch.py#   CodeFormer transformer
-│       └── vqgan_arch.py     #   VQ-GAN autoencoder (used by CodeFormer)
+│       ├── vqgan_arch.py     #   VQ-GAN autoencoder (used by CodeFormer)
+│       ├── old_photo_detect_arch.py  # UNet scratch detection
+│       ├── old_photo_global_arch.py  # VAE + mapping network
+│       └── old_photo_face_arch.py    # SPADE face enhancement
 ├── utils/
 │   ├── __init__.py
 │   ├── downloader.py        # Model weight download & caching
@@ -84,7 +87,7 @@ Follow these 5 steps to add a new image processing model.
 
 ### Step 1: Add download entry (`utils/downloader.py`)
 
-Add the model's weight URLs to `MODEL_URLS`:
+For **single-file models**, add the weight URLs to `MODEL_URLS`:
 
 ```python
 MODEL_URLS: dict[str, dict[str, str]] = {
@@ -106,6 +109,22 @@ FILENAME_OVERRIDES: dict[str, dict[str, str]] = {
     },
 }
 ```
+
+For **multi-file models** (multiple weight files per variant), add to `MODEL_URLS_MULTI` instead:
+
+```python
+MODEL_URLS_MULTI: dict[str, dict[str, dict[str, str]]] = {
+    # ... existing entries ...
+    "new_category": {
+        "variant_a": {
+            "network_a.pth": "https://example.com/network_a.pth",
+            "network_b.pth": "https://example.com/network_b.pth",
+        },
+    },
+}
+```
+
+Multi-file models use `ensure_model_files_exist()` which returns a directory path instead of a file path.
 
 ### Step 2: Add architecture module (`models/archs/`)
 
@@ -188,6 +207,8 @@ MODEL_CONFIG = {
     },
 }
 ```
+
+For multi-file models, add `"multi_file": True` to the config entry. This tells the lifespan to use `ensure_model_files_exist()` instead of `ensure_model_exists()`, and the wrapper receives a directory path rather than a file path.
 
 Don't forget to import the wrapper:
 
@@ -298,8 +319,14 @@ curl -X POST "http://localhost:8000/v1/face-restore?fidelity=0.7&upscale=2" -F "
 # Upscale
 curl -X POST "http://localhost:8000/v1/upscale?scale=4&tile_size=512" -F "file=@photo.jpg" -o output.png
 
+# Old photo restore
+curl -X POST http://localhost:8000/v1/old-photo-restore -F "file=@old_photo.jpg" -o output.png
+
 # Pipeline
 curl -X POST "http://localhost:8000/v1/pipeline?width=4000" -F "file=@photo.jpg" -o output.png
+
+# Pipeline with old photo restore
+curl -X POST "http://localhost:8000/v1/pipeline?old_photo_restore=true&colorize=true" -F "file=@old_photo.jpg" -o output.png
 ```
 
 ### Checking Specific Errors
@@ -331,6 +358,7 @@ numpy>=1.24.0
 facexlib>=0.3.0
 python-json-logger>=3.0
 prometheus-fastapi-instrumentator>=7.0
+dlib>=19.24.0
 ```
 
 Key notes:
@@ -339,6 +367,7 @@ Key notes:
 - **DDColor is NOT in requirements.txt**: It's installed separately from git with `--no-deps` to avoid the `basicsr` conflict.
 - **python-json-logger**: Provides JSON-formatted structured logging.
 - **prometheus-fastapi-instrumentator**: Auto-instruments routes and exposes `/metrics`.
+- **dlib**: Used by `OldPhotoRestoreWrapper` for face detection and 68-point landmark extraction. Requires `cmake` at build time.
 
 ### Adding a New Dependency
 

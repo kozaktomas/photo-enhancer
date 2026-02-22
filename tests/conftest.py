@@ -24,6 +24,7 @@ def mock_registry():
         "restore": _make_mock_model(),
         "face": _make_mock_model(),
         "upscale": _make_mock_model(),
+        "old_photo_restore": _make_mock_model(),
     }
 
 

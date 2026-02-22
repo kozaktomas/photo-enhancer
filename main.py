@@ -27,9 +27,10 @@ from models.wrappers import (  # noqa: E402
     CodeFormerWrapper,
     DDColorWrapper,
     NAFNetWrapper,
+    OldPhotoRestoreWrapper,
     RealESRGANWrapper,
 )
-from utils.downloader import ensure_model_exists  # noqa: E402
+from utils.downloader import ensure_model_exists, ensure_model_files_exist  # noqa: E402
 from utils.image_ops import encode_image, read_image, validate_and_resize  # noqa: E402
 from utils.logging import setup_logging  # noqa: E402
 
@@ -99,6 +100,12 @@ MODEL_CONFIG = {
         "default": "x4plus",
         "wrapper": RealESRGANWrapper,
     },
+    "old_photo_restore": {
+        "env_var": "MODEL_OLD_PHOTO",
+        "default": "v1",
+        "wrapper": OldPhotoRestoreWrapper,
+        "multi_file": True,
+    },
 }
 
 
@@ -115,7 +122,10 @@ async def lifespan(app: FastAPI):
     for category, cfg in MODEL_CONFIG.items():
         variant = os.environ.get(cfg["env_var"], cfg["default"])
         try:
-            model_path = ensure_model_exists(category, variant)
+            if cfg.get("multi_file"):
+                model_path = ensure_model_files_exist(category, variant)
+            else:
+                model_path = ensure_model_exists(category, variant)
             wrapper = cfg["wrapper"](model_path, device, variant=variant)
             model_registry[category] = wrapper
             logger.info("Loaded model: %s/%s", category, variant)
@@ -437,9 +447,71 @@ def upscale(
         return JSONResponse(status_code=500, content={"detail": "Internal processing error"})
 
 
+@v1_router.post("/old-photo-restore")
+def old_photo_restore(
+    file: UploadFile = File(...),
+    with_scratch: bool = Query(True),
+    with_face: bool = Query(True),
+    scratch_threshold: float = Query(0.4, ge=0.0, le=1.0),
+    output_format: str = Query("png", pattern="^(png|jpg|jpeg|webp)$"),
+):
+    """Restore an old or damaged photo.
+
+    Detects and repairs scratches, restores global quality via VAE, and
+    optionally enhances detected faces using a SPADE generator.
+
+    Args:
+        file: Input image file.
+        with_scratch: Enable automatic scratch detection and repair.
+        with_face: Enable face enhancement.
+        scratch_threshold: Sensitivity for scratch detection (0.0-1.0).
+        output_format: Desired output image format.
+
+    Returns:
+        The restored image as binary content.
+    """
+    try:
+        file_bytes = file.file.read()
+        check_file_size(file_bytes)
+        image = read_image(file_bytes)
+        image = validate_and_resize(image)
+    except FileTooLargeError as e:
+        return JSONResponse(status_code=413, content={"detail": str(e)})
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+
+    model = get_model("old_photo_restore")
+    if model is None:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Old photo restoration model not loaded"},
+        )
+
+    try:
+        result = model.predict(
+            image,
+            with_scratch=with_scratch,
+            with_face=with_face,
+            scratch_threshold=scratch_threshold,
+        )
+        cuda_clear()
+        output = encode_image(result, output_format)
+        return Response(
+            content=output,
+            media_type=MEDIA_TYPES.get(output_format, "image/png"),
+        )
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    except Exception:
+        cuda_clear()
+        logger.exception("Old photo restore error")
+        return JSONResponse(status_code=500, content={"detail": "Internal processing error"})
+
+
 @v1_router.post("/pipeline")
 def pipeline(
     file: UploadFile = File(...),
+    old_photo_restore: bool = Query(False),
     restore: bool = Query(True),
     face_restore: bool = Query(True),
     colorize: bool = Query(True),
@@ -447,6 +519,9 @@ def pipeline(
     width: int = Query(2400, ge=1),
     height: int = Query(2400, ge=1),
     output_format: str = Query("png", pattern="^(png|jpg|jpeg|webp)$"),
+    # old photo restore params
+    with_scratch: bool = Query(True),
+    scratch_threshold: float = Query(0.4, ge=0.0, le=1.0),
     # colorize params
     render_factor: int = Query(35, ge=1, le=100),
     # restore params
@@ -458,10 +533,11 @@ def pipeline(
 ):
     """Run multiple enhancement steps in a single request.
 
-    Pipeline order: colorize -> restore -> upscale -> resize -> face restore.
+    Pipeline order: old_photo_restore -> colorize -> restore -> upscale -> resize -> face restore.
 
     Args:
         file: Input image file.
+        old_photo_restore: Enable old photo restoration step (off by default).
         restore: Enable restoration step.
         face_restore: Enable face restoration step.
         colorize: Enable colorization step.
@@ -469,6 +545,8 @@ def pipeline(
         width: Target output width.
         height: Target output height.
         output_format: Desired output image format.
+        with_scratch: Enable scratch detection in old photo restore.
+        scratch_threshold: Scratch detection sensitivity (0.0-1.0).
         render_factor: Colorization intensity (1-100).
         restore_tile_size: Tile size for restoration (0 = no tiling).
         fidelity: Face restoration fidelity (0.0-1.0).
@@ -488,6 +566,8 @@ def pipeline(
         return JSONResponse(status_code=400, content={"detail": str(e)})
 
     steps = []
+    if old_photo_restore:
+        steps.append(("old_photo_restore", "Old photo restoration"))
     if colorize:
         steps.append(("colorize", "Colorization"))
     if restore:
@@ -511,6 +591,13 @@ def pipeline(
         )
 
     try:
+        if old_photo_restore:
+            image = model_registry["old_photo_restore"].predict(
+                image,
+                with_scratch=with_scratch,
+                scratch_threshold=scratch_threshold,
+            )
+            cuda_clear()
         if colorize:
             image = model_registry["colorize"].predict(image, render_factor=render_factor)
             cuda_clear()
@@ -556,7 +643,14 @@ app.include_router(v1_router)
 # Legacy redirects (307 preserves POST method and body)
 # ---------------------------------------------------------------------------
 
-_LEGACY_PATHS = ["/colorize", "/restore", "/face-restore", "/upscale", "/pipeline"]
+_LEGACY_PATHS = [
+    "/colorize",
+    "/restore",
+    "/face-restore",
+    "/upscale",
+    "/old-photo-restore",
+    "/pipeline",
+]
 
 
 for _path in _LEGACY_PATHS:

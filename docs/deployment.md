@@ -71,6 +71,7 @@ environment:
   - MODEL_RESTORE=deblur         # denoise (default), deblur
   - MODEL_FACE=v0.1              # v0.1 (default)
   - MODEL_UPSCALE=x2plus         # x4plus (default), x4anime, x2plus
+  - MODEL_OLD_PHOTO=v1           # v1 (default)
 ```
 
 ### Changing the Port
@@ -132,6 +133,7 @@ Model weights will be downloaded to `/app/weights/` by default. On local develop
 | `MODEL_RESTORE` | `denoise` | NAFNet variant: `denoise`, `deblur` |
 | `MODEL_FACE` | `v0.1` | CodeFormer variant: `v0.1` |
 | `MODEL_UPSCALE` | `x4plus` | Real-ESRGAN variant: `x4plus`, `x4anime`, `x2plus` |
+| `MODEL_OLD_PHOTO` | `v1` | Old Photo Restore variant: `v1` |
 | `FORCE_CPU` | `false` | Force CPU inference even if CUDA is available |
 | `TORCH_HOME` | `/app/weights/.torch` | PyTorch cache directory (set in Dockerfile) |
 | `HF_HOME` | `/app/weights/.huggingface` | HuggingFace cache directory (set in Dockerfile) |

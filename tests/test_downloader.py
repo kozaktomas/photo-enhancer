@@ -5,7 +5,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from utils.downloader import _resolve_google_drive_url, ensure_model_exists
+from utils.downloader import (
+    _resolve_google_drive_url,
+    ensure_model_exists,
+    ensure_model_files_exist,
+)
 
 
 class TestResolveGoogleDriveUrl:
@@ -79,3 +83,33 @@ class TestEnsureModelExists:
         result = ensure_model_exists("face", "v0.1", weights_dir=str(tmp_path))
         assert Path(result).exists()
         assert "codeformer.pth" in result
+
+
+class TestEnsureModelFilesExist:
+    def test_unknown_category_raises(self, tmp_path):
+        with pytest.raises(ValueError, match="Unknown multi-file model category"):
+            ensure_model_files_exist("nonexistent", "v1", weights_dir=str(tmp_path))
+
+    def test_unknown_variant_raises(self, tmp_path):
+        with pytest.raises(ValueError, match="Unknown variant"):
+            ensure_model_files_exist(
+                "old_photo_restore", "nonexistent_variant", weights_dir=str(tmp_path)
+            )
+
+    def test_cached_files_return_immediately(self, tmp_path):
+        """If all weight files already exist, skip download and return dir."""
+        weight_dir = tmp_path / "old_photo_restore"
+        weight_dir.mkdir()
+        filenames = [
+            "scratch_detection.pt",
+            "vae_a_encoder.pth",
+            "vae_b_decoder.pth",
+            "mapping_net.pth",
+            "face_enhance_gen.pth",
+            "shape_predictor_68_face_landmarks.dat",
+        ]
+        for fn in filenames:
+            (weight_dir / fn).write_bytes(b"\x80\x02" + b"\x00" * 100)
+
+        result = ensure_model_files_exist("old_photo_restore", "v1", weights_dir=str(tmp_path))
+        assert result == str(weight_dir)

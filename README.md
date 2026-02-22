@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-REST API for AI-powered photo enhancement: colorization, restoration, face restoration, and upscaling.
+REST API for AI-powered photo enhancement: colorization, restoration, face restoration, upscaling, and old photo restoration.
 
 Built with FastAPI and PyTorch. Runs on CUDA GPU or CPU. Vibecoded with [Claude Code](https://claude.ai/code).
 
@@ -17,6 +17,7 @@ Built with FastAPI and PyTorch. Runs on CUDA GPU or CPU. Vibecoded with [Claude 
   - [Restore](#restore)
   - [Face Restore](#face-restore)
   - [Upscale](#upscale)
+  - [Old Photo Restore](#old-photo-restore)
   - [Pipeline](#pipeline)
   - [HTTP Status Codes](#http-status-codes)
 - [Environment Variables](#environment-variables)
@@ -34,6 +35,7 @@ Built with FastAPI and PyTorch. Runs on CUDA GPU or CPU. Vibecoded with [Claude 
 | `/v1/restore` | [NAFNet](https://github.com/megvii-research/NAFNet) | `denoise` (default), `deblur` |
 | `/v1/face-restore` | [CodeFormer](https://github.com/sczhou/CodeFormer) | `v0.1` (default) |
 | `/v1/upscale` | [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) | `x4plus` (default), `x4anime`, `x2plus` |
+| `/v1/old-photo-restore` | [Old Photo Restoration](https://github.com/microsoft/Bringing-Old-Photos-Back-to-Life) | `v1` (default) |
 
 Model weights are downloaded automatically on first startup.
 
@@ -94,7 +96,7 @@ Response:
 {
   "status": "healthy",
   "device": "cuda",
-  "loaded_models": ["colorize", "restore", "face", "upscale"],
+  "loaded_models": ["colorize", "restore", "face", "upscale", "old_photo_restore"],
   "cuda_info": {
     "gpu_name": "NVIDIA GeForce RTX 3090",
     "vram_total_gb": 24.0,
@@ -209,9 +211,35 @@ curl -X POST "http://localhost:8000/v1/upscale?scale=4&tile_size=512&output_form
 | `tile_size` | int (>=0) | 512 | Tile size for processing (0 = no tiling). Use tiling to reduce VRAM usage on large images. |
 | `output_format` | string | png | Output format: `png`, `jpg`, `jpeg`, `webp` |
 
+### Old Photo Restore
+
+Restore old or damaged photos. Detects and repairs scratches, restores global quality, and optionally enhances faces.
+
+```bash
+curl -X POST http://localhost:8000/v1/old-photo-restore \
+  -F "file=@old_photo.jpg" \
+  -o restored.png
+```
+
+With parameters:
+
+```bash
+curl -X POST "http://localhost:8000/v1/old-photo-restore?with_scratch=true&with_face=true&scratch_threshold=0.4&output_format=png" \
+  -F "file=@old_photo.jpg" \
+  -o restored.png
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `file` | file | required | Input image (max 32 MB) |
+| `with_scratch` | bool | true | Enable automatic scratch detection and repair |
+| `with_face` | bool | true | Enable face enhancement |
+| `scratch_threshold` | float (0.0-1.0) | 0.4 | Sensitivity for scratch detection |
+| `output_format` | string | png | Output format: `png`, `jpg`, `jpeg`, `webp` |
+
 ### Pipeline
 
-Run multiple processing steps in a single request. Order: colorize -> restore -> upscale -> face restore.
+Run multiple processing steps in a single request. Order: old_photo_restore -> colorize -> restore -> upscale -> face restore.
 
 ```bash
 curl -X POST "http://localhost:8000/v1/pipeline?width=4000&output_format=png" \
@@ -222,12 +250,15 @@ curl -X POST "http://localhost:8000/v1/pipeline?width=4000&output_format=png" \
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `file` | file | required | Input image (max 32 MB) |
+| `old_photo_restore` | bool | false | Enable old photo restoration step |
 | `colorize` | bool | true | Enable colorization step |
 | `restore` | bool | true | Enable restoration step |
 | `face_restore` | bool | true | Enable face restoration step |
 | `upscale` | bool | true | Enable upscale step |
 | `width` | int (>=1) | 2400 | Target output width |
 | `height` | int (>=1) | 2400 | Target output height |
+| `with_scratch` | bool | true | Enable scratch detection (old photo restore) |
+| `scratch_threshold` | float (0.0-1.0) | 0.4 | Scratch detection sensitivity (old photo restore) |
 | `render_factor` | int (1-100) | 35 | Colorization intensity |
 | `restore_tile_size` | int (>=0) | 0 | Tile size for restoration |
 | `fidelity` | float (0.0-1.0) | 0.7 | Face restoration fidelity |
@@ -258,6 +289,7 @@ Error responses return JSON:
 | `MODEL_RESTORE` | `denoise` | NAFNet variant (`denoise`, `deblur`) |
 | `MODEL_FACE` | `v0.1` | CodeFormer variant (`v0.1`) |
 | `MODEL_UPSCALE` | `x4plus` | Real-ESRGAN variant (`x4plus`, `x4anime`, `x2plus`) |
+| `MODEL_OLD_PHOTO` | `v1` | Old Photo Restore variant (`v1`) |
 | `FORCE_CPU` | `false` | Force CPU inference even if CUDA is available |
 
 ## Testing
@@ -282,10 +314,13 @@ photo-enhancer/
 ├── models/
 │   ├── wrappers.py          # Model wrapper classes (predict interface)
 │   └── archs/               # Vendored PyTorch architecture definitions
-│       ├── rrdbnet_arch.py   #   Real-ESRGAN (RRDBNet)
-│       ├── nafnet_arch.py    #   NAFNet
-│       ├── codeformer_arch.py#   CodeFormer
-│       └── vqgan_arch.py     #   VQ-GAN autoencoder (used by CodeFormer)
+│       ├── rrdbnet_arch.py          #   Real-ESRGAN (RRDBNet)
+│       ├── nafnet_arch.py           #   NAFNet
+│       ├── codeformer_arch.py       #   CodeFormer
+│       ├── vqgan_arch.py            #   VQ-GAN autoencoder (used by CodeFormer)
+│       ├── old_photo_detect_arch.py #   Old Photo Restore scratch detection (UNet)
+│       ├── old_photo_global_arch.py #   Old Photo Restore VAE + mapping network
+│       └── old_photo_face_arch.py   #   Old Photo Restore face enhancement (SPADE)
 ├── utils/
 │   ├── downloader.py        # Model weight downloader (HF/GitHub/GDrive)
 │   ├── image_ops.py         # Image read/validate/resize/encode
@@ -313,12 +348,13 @@ photo-enhancer/
 
 ## Architecture
 
-All four models run real AI inference using vendored PyTorch architectures in `models/archs/`. Model architectures (block counts, widths, scale factors) are inferred from checkpoint keys at load time — no hard-coded config per variant. This means dropping in a different weight file for the same model family will just work.
+All five models run real AI inference using vendored PyTorch architectures in `models/archs/`. Model architectures (block counts, widths, scale factors) are inferred from checkpoint keys at load time — no hard-coded config per variant. This means dropping in a different weight file for the same model family will just work.
 
 Dependencies:
 - **DDColor**: installed via pip (`ddcolor` package, uses bundled `basicsr==1.3.4.6`)
-- **NAFNet, Real-ESRGAN, CodeFormer**: architectures vendored locally in `models/archs/` to avoid requiring `basicsr>=1.4.2` (which would conflict with DDColor)
+- **NAFNet, Real-ESRGAN, CodeFormer, Old Photo Restore**: architectures vendored locally in `models/archs/` to avoid requiring `basicsr>=1.4.2` (which would conflict with DDColor)
 - **CodeFormer** additionally uses `facexlib` for face detection and alignment
+- **Old Photo Restore** additionally uses `dlib` for face detection and landmark extraction
 
 ## Notes
 

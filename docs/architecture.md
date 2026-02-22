@@ -5,7 +5,8 @@
 ```
 Client
   │
-  │  POST /v1/colorize, /v1/restore, /v1/face-restore, /v1/upscale, /v1/pipeline
+  │  POST /v1/colorize, /v1/restore, /v1/face-restore, /v1/upscale,
+  │        /v1/old-photo-restore, /v1/pipeline
   │  (multipart/form-data with image file)
   ▼
 ┌─────────────────────────────────────────────────────────┐
@@ -34,7 +35,8 @@ Client
 │  NAFNetWrapper  │
 │  CodeFormer…    │            ┌──────────────────────┐
 │  RealESRGAN…    │            │  utils/logging.py    │
-└────────┬────────┘            │  JSON structured     │
+│  OldPhotoRe…    │            │  JSON structured     │
+└────────┬────────┘            │                      │
          │                     │  logging setup       │
          ▼                     └──────────────────────┘
 ┌─────────────────┐
@@ -59,12 +61,12 @@ Client
 The FastAPI application. Responsibilities:
 
 - **Lifespan management**: The `lifespan` async context manager runs on startup/shutdown. On startup it detects the device (CUDA/CPU), iterates `MODEL_CONFIG`, downloads weights via `ensure_model_exists()`, and instantiates wrapper objects into the global `model_registry` dict. On shutdown it clears the registry and empties the CUDA cache.
-- **Model config**: `MODEL_CONFIG` maps each category (`colorize`, `restore`, `face`, `upscale`) to its environment variable name, default variant, and wrapper class.
+- **Model config**: `MODEL_CONFIG` maps each category (`colorize`, `restore`, `face`, `upscale`, `old_photo_restore`) to its environment variable name, default variant, and wrapper class. Multi-file models set `"multi_file": True`.
 - **API versioning**: All image processing endpoints live on a `/v1` router. Legacy un-prefixed paths return 307 redirects to their `/v1` equivalents.
 - **File size validation**: `check_file_size()` rejects uploads exceeding 32 MB with HTTP 413.
 - **Request logging**: `RequestLoggingMiddleware` logs every request with method, path, status code, duration, and client IP as structured JSON.
 - **Prometheus metrics**: `prometheus-fastapi-instrumentator` auto-instruments all routes and exposes `GET /metrics`. `/health` and `/metrics` are excluded from instrumentation.
-- **Endpoints**: Five `POST` endpoints on the `/v1` router, each following the identical pattern: size check → decode → validate → predict → encode → respond. One `GET /health` and one `GET /metrics` at root.
+- **Endpoints**: Six `POST` endpoints on the `/v1` router, each following the identical pattern: size check → decode → validate → predict → encode → respond. One `GET /health` and one `GET /metrics` at root.
 - **Error handling**: `FileTooLargeError` → 413, `ValueError` → 400, model missing → 503, other exceptions → 500 with `logger.exception()`.
 
 ### `utils/logging.py`
@@ -73,7 +75,7 @@ Configures structured JSON logging using `python-json-logger`. The `setup_loggin
 
 ### `models/wrappers.py`
 
-Four wrapper classes, each with the same interface:
+Five wrapper classes, each with the same interface:
 
 ```python
 class XxxWrapper:
@@ -90,6 +92,7 @@ class XxxWrapper:
 | `NAFNetWrapper` | NAFNet | Infers architecture (encoder/decoder block counts, middle blocks, width) from checkpoint key names. No hard-coded config per variant. |
 | `RealESRGANWrapper` | Real-ESRGAN (RRDBNet) | Infers architecture (num_feat, num_block, num_grow_ch, scale) from checkpoint. Supports tiled processing for large images. |
 | `CodeFormerWrapper` | CodeFormer | Fixed architecture params (dim_embd=512, codebook_size=1024, etc). Uses `facexlib.FaceRestoreHelper` for face detection, alignment, and paste-back. |
+| `OldPhotoRestoreWrapper` | Old Photo Restore | Multi-file model (6 weights). Three-stage pipeline: UNet scratch detection → VAE + mapping network global restore → SPADE face enhancement. Uses `dlib` for face detection/alignment. `model_path` is a directory. |
 
 ### `models/archs/`
 
@@ -101,6 +104,9 @@ Vendored PyTorch `nn.Module` definitions:
 | `nafnet_arch.py` | `NAFNet` | `NAFNetWrapper` |
 | `codeformer_arch.py` | `CodeFormer` | `CodeFormerWrapper` |
 | `vqgan_arch.py` | `VQAutoEncoder` | Used internally by CodeFormer architecture |
+| `old_photo_detect_arch.py` | `UNet` | Scratch detection for Old Photo Restore |
+| `old_photo_global_arch.py` | `GlobalGenerator_DCDCv2`, `Mapping_Model_with_mask_2` | VAE + mapping network for Old Photo Restore |
+| `old_photo_face_arch.py` | `SPADEGenerator` | Face enhancement for Old Photo Restore |
 
 These are vendored (copied into the repo) rather than installed via pip to avoid the `basicsr` version conflict (see [Dependency Strategy](#dependency-strategy)).
 
@@ -108,8 +114,10 @@ These are vendored (copied into the repo) rather than installed via pip to avoid
 
 Handles model weight downloads:
 
-- `MODEL_URLS` dict maps `category → variant → URL`
+- `MODEL_URLS` dict maps `category → variant → URL` for single-file models
+- `MODEL_URLS_MULTI` dict maps `category → variant → {filename: URL}` for multi-file models (e.g. Old Photo Restore with 6 weight files)
 - `FILENAME_OVERRIDES` provides explicit filenames for URLs that don't have meaningful filenames (Google Drive)
+- `ensure_model_exists()` handles single-file downloads; `ensure_model_files_exist()` handles multi-file downloads and returns a directory path
 - Downloads use `.part` file handling for atomicity — partial downloads don't leave corrupt files
 - Google Drive URLs are resolved via `drive.usercontent.google.com` to bypass the virus-scan interstitial page
 - Downloaded files are validated: if the first bytes are `<` (HTML), the download is rejected as corrupt
@@ -156,9 +164,9 @@ Server start
   │
   ├─ For each model in MODEL_CONFIG:
   │    ├─ Read variant from environment variable (or use default)
-  │    ├─ ensure_model_exists(category, variant)
-  │    │    ├─ Check if weight file exists on disk
-  │    │    ├─ Validate it's not a corrupt HTML download
+  │    ├─ ensure_model_exists() or ensure_model_files_exist() based on multi_file flag
+  │    │    ├─ Check if weight file(s) exist on disk
+  │    │    ├─ Validate they're not corrupt HTML downloads
   │    │    └─ Download from URL if missing (with .part atomicity)
   │    ├─ Instantiate wrapper class(model_path, device, variant)
   │    │    ├─ torch.load() the checkpoint
@@ -168,7 +176,7 @@ Server start
   │    └─ Store in model_registry[category]
   │    └─ On failure: log error, skip (endpoint returns 503)
   │
-  └─ Log "Startup complete — N/4 models loaded"
+  └─ Log "Startup complete — N/5 models loaded"
 
 Server shutdown
   │

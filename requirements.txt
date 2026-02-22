@@ -7,3 +7,4 @@ numpy>=1.24.0
 facexlib>=0.3.0
 python-json-logger>=3.0
 prometheus-fastapi-instrumentator>=7.0
+dlib>=19.24.0
