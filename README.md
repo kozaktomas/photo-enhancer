@@ -55,15 +55,15 @@ Or build locally:
 docker compose up --build
 ```
 
-GPU support requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html). To run on CPU only, set `FORCE_CPU=true` in `docker-compose.yml`.
+The Docker image uses CPU-only PyTorch. For GPU support, you'll need to modify the `Dockerfile` to install `requirements-gpu.txt` instead and use a CUDA base image.
 
 **Estimated disk usage:**
 
 | Component | Size |
 |---|---|
-| Docker image (Python + PyTorch CPU + deps) | ~2 GB |
-| Model weights (downloaded on first startup) | ~1 GB |
-| **Total** | **~3 GB** |
+| Docker image (Python + PyTorch CPU + deps) | ~3.6 GB |
+| Model weights (downloaded on first startup) | ~2.6 GB |
+| **Total** | **~6.2 GB** |
 
 ### Local
 
