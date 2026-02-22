@@ -6,9 +6,7 @@ from .vqgan_arch import Fuse_sft_block, ResBlock, VQAutoEncoder
 
 
 class TransformerSALayer(nn.Module):
-    def __init__(
-        self, embed_dim, nhead=8, dim_mlp=2048, dropout=0.0, activation="gelu"
-    ):
+    def __init__(self, embed_dim, nhead=8, dim_mlp=2048, dropout=0.0, activation="gelu"):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(
             embed_dim,

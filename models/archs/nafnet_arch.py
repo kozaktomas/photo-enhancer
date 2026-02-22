@@ -54,12 +54,8 @@ class NAFBlock(nn.Module):
         self.norm1 = LayerNorm2d(c)
         self.norm2 = LayerNorm2d(c)
 
-        self.dropout1 = (
-            nn.Dropout(drop_out_rate) if drop_out_rate > 0.0 else nn.Identity()
-        )
-        self.dropout2 = (
-            nn.Dropout(drop_out_rate) if drop_out_rate > 0.0 else nn.Identity()
-        )
+        self.dropout1 = nn.Dropout(drop_out_rate) if drop_out_rate > 0.0 else nn.Identity()
+        self.dropout2 = nn.Dropout(drop_out_rate) if drop_out_rate > 0.0 else nn.Identity()
 
         self.beta = nn.Parameter(torch.zeros((1, c, 1, 1)), requires_grad=True)
         self.gamma = nn.Parameter(torch.zeros((1, c, 1, 1)), requires_grad=True)
@@ -111,9 +107,7 @@ class NAFNet(nn.Module):
             self.downs.append(nn.Conv2d(chan, 2 * chan, 2, 2))
             chan = chan * 2
 
-        self.middle_blks = nn.Sequential(
-            *[NAFBlock(chan) for _ in range(middle_blk_num)]
-        )
+        self.middle_blks = nn.Sequential(*[NAFBlock(chan) for _ in range(middle_blk_num)])
 
         for num in dec_blk_nums:
             self.ups.append(

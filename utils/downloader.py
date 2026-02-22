@@ -35,23 +35,47 @@ FILENAME_OVERRIDES: dict[str, dict[str, str]] = {
 
 
 def _resolve_google_drive_url(url: str) -> str:
-    """Convert a Google Drive share/uc URL to the usercontent direct-download URL."""
+    """Convert a Google Drive share/uc URL to a direct-download URL.
+
+    Extracts the file ID from the URL and constructs a
+    ``drive.usercontent.google.com`` URL that bypasses the virus-scan
+    interstitial page.
+
+    Args:
+        url: Original Google Drive URL containing an ``id`` query parameter.
+
+    Returns:
+        Direct-download URL, or the original URL if no file ID is found.
+    """
     import re
 
     match = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", url)
     if match:
         file_id = match.group(1)
         return (
-            f"https://drive.usercontent.google.com/download"
-            f"?id={file_id}&export=download&confirm=t"
+            f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t"
         )
     return url
 
 
-def _download_file(
-    url: str, dest: Path, part: Path, category: str, variant: str
-) -> None:
-    """Download a file, with Google Drive large-file handling."""
+def _download_file(url: str, dest: Path, part: Path, category: str, variant: str) -> None:
+    """Download a model weight file to ``part``, validating it is not HTML.
+
+    Google Drive URLs are resolved to direct-download URLs before fetching.
+    After download, the first bytes are checked to reject HTML error pages
+    that may be served instead of the real model file.
+
+    Args:
+        url: Source download URL.
+        dest: Final destination path (not written by this function).
+        part: Temporary ``.part`` path to stream into.
+        category: Model category name (for logging).
+        variant: Model variant name (for logging).
+
+    Raises:
+        requests.HTTPError: If the HTTP response status is not OK.
+        RuntimeError: If the downloaded file appears to be HTML.
+    """
     session = requests.Session()
 
     if "drive.google.com" in url:
@@ -87,6 +111,23 @@ def ensure_model_exists(
     variant: str,
     weights_dir: str = os.environ.get("WEIGHTS_DIR", "/app/weights"),
 ) -> str:
+    """Ensure the weight file for the given model category/variant exists on disk.
+
+    If the file is already present and valid, returns immediately. Otherwise
+    downloads it from the URL registered in ``MODEL_URLS``.
+
+    Args:
+        category: Model category (e.g. ``"colorize"``, ``"restore"``).
+        variant: Variant name within the category.
+        weights_dir: Root directory for weight storage.
+
+    Returns:
+        Absolute path to the weight file.
+
+    Raises:
+        ValueError: If the category or variant is unknown.
+        RuntimeError: If the download produces a corrupt (HTML) file.
+    """
     if category not in MODEL_URLS:
         raise ValueError(f"Unknown model category: {category}")
     variants = MODEL_URLS[category]
@@ -98,10 +139,7 @@ def ensure_model_exists(
 
     url = variants[variant]
 
-    filename = (
-        FILENAME_OVERRIDES.get(category, {}).get(variant)
-        or url.split("/")[-1].split("?")[0]
-    )
+    filename = FILENAME_OVERRIDES.get(category, {}).get(variant) or url.split("/")[-1].split("?")[0]
 
     dest_dir = Path(weights_dir) / category
     dest_dir.mkdir(parents=True, exist_ok=True)

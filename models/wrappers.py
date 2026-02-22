@@ -1,5 +1,6 @@
 import logging
 import math
+from typing import ClassVar
 
 import cv2
 import numpy as np
@@ -11,16 +12,21 @@ logger = logging.getLogger(__name__)
 class DDColorWrapper:
     """Wrapper for DDColor colorization model — real inference."""
 
-    MODEL_SIZE_MAP = {
+    MODEL_SIZE_MAP: ClassVar[dict[str, str]] = {
         "paper_tiny": "tiny",
         "modelscope": "large",
         "artistic": "large",
     }
 
-    def __init__(
-        self, model_path: str, device: str, variant: str = "paper_tiny"
-    ) -> None:
-        from ddcolor import DDColor, ColorizationPipeline, build_ddcolor_model
+    def __init__(self, model_path: str, device: str, variant: str = "paper_tiny") -> None:
+        """Load DDColor model and build the colorization pipeline.
+
+        Args:
+            model_path: Path to the DDColor checkpoint file.
+            device: Compute device string (``"cuda"``, ``"mps"``, or ``"cpu"``).
+            variant: Model variant name used to select model size.
+        """
+        from ddcolor import ColorizationPipeline, DDColor, build_ddcolor_model
 
         model_size = self.MODEL_SIZE_MAP.get(variant, "tiny")
         torch_device = torch.device(device)
@@ -32,15 +38,20 @@ class DDColorWrapper:
             model_size=model_size,
             device=torch_device,
         )
-        self.pipeline = ColorizationPipeline(
-            self.model, input_size=512, device=torch_device
-        )
+        self.pipeline = ColorizationPipeline(self.model, input_size=512, device=torch_device)
         self.device = device
-        logger.info(
-            "DDColorWrapper loaded — %s (size=%s) on %s", model_path, model_size, device
-        )
+        logger.info("DDColorWrapper loaded — %s (size=%s) on %s", model_path, model_size, device)
 
     def predict(self, image: np.ndarray, **kwargs) -> np.ndarray:
+        """Colorize a grayscale/B&W image.
+
+        Args:
+            image: BGR uint8 numpy array.
+            **kwargs: Optional ``render_factor`` (unused by DDColor pipeline).
+
+        Returns:
+            Colorized BGR uint8 numpy array.
+        """
         return self.pipeline.process(image)
 
 
@@ -48,7 +59,15 @@ class RealESRGANWrapper:
     """Wrapper for Real-ESRGAN upscaling model — real inference."""
 
     def __init__(self, model_path: str, device: str, variant: str = "x4plus") -> None:
+        """Load a Real-ESRGAN RRDBNet checkpoint, inferring architecture from keys.
+
+        Args:
+            model_path: Path to the Real-ESRGAN checkpoint file.
+            device: Compute device string.
+            variant: Model variant name (informational, architecture is inferred).
+        """
         import re
+
         from models.archs.rrdbnet_arch import RRDBNet
 
         self.device = device
@@ -65,13 +84,10 @@ class RealESRGANWrapper:
         num_out_ch = state_dict["conv_last.weight"].shape[0]
         num_grow_ch = state_dict["body.0.rdb1.conv1.weight"].shape[0]
         num_block = 1 + max(
-            int(m.group(1))
-            for k in state_dict
-            for m in [re.match(r"body\.(\d+)\.", k)]
-            if m
+            int(m.group(1)) for k in state_dict for m in [re.match(r"body\.(\d+)\.", k)] if m
         )
         # conv_first input channels reveal the scale:
-        # 3 → scale 4 (raw input), 12 → scale 2 (pixel_unshuffle ×2)
+        # 3 -> scale 4 (raw input), 12 -> scale 2 (pixel_unshuffle x2)
         self.scale = {3: 4, 12: 2, 48: 1}.get(num_in_ch, 4)
 
         model = RRDBNet(
@@ -95,19 +111,24 @@ class RealESRGANWrapper:
         )
 
     def predict(self, image: np.ndarray, **kwargs) -> np.ndarray:
+        """Upscale an image using the loaded Real-ESRGAN model.
+
+        Args:
+            image: BGR uint8 numpy array.
+            **kwargs: Optional ``tile_size`` (int) for tiled processing,
+                ``scale`` (int, unused — scale is determined by the model).
+
+        Returns:
+            Upscaled BGR uint8 numpy array.
+        """
         tile_size = kwargs.get("tile_size", 0)
 
         # BGR uint8 -> RGB float32 [0, 1]
         img = image[:, :, ::-1].astype(np.float32) / 255.0
-        img_t = (
-            torch.from_numpy(img.copy()).permute(2, 0, 1).unsqueeze(0).to(self.device)
-        )
+        img_t = torch.from_numpy(img.copy()).permute(2, 0, 1).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
-            if tile_size > 0:
-                output = self._tile_process(img_t, tile_size)
-            else:
-                output = self.model(img_t)
+            output = self._tile_process(img_t, tile_size) if tile_size > 0 else self.model(img_t)
 
         output = output.squeeze(0).permute(1, 2, 0).cpu().numpy()
         output = np.clip(output * 255.0, 0, 255).astype(np.uint8)
@@ -115,6 +136,19 @@ class RealESRGANWrapper:
         return output[:, :, ::-1].copy()
 
     def _tile_process(self, img, tile_size=256, tile_pad=10):
+        """Process an image tensor in tiles to limit VRAM usage.
+
+        Splits the input into a grid of overlapping tiles, runs each through the
+        model, strips the overlap padding, and assembles the output.
+
+        Args:
+            img: Input tensor of shape ``(B, C, H, W)``.
+            tile_size: Tile dimension in pixels (default 256).
+            tile_pad: Overlap padding in pixels (default 10).
+
+        Returns:
+            Output tensor of shape ``(B, C, H*scale, W*scale)``.
+        """
         batch, channel, height, width = img.shape
         output_height = height * self.scale
         output_width = width * self.scale
@@ -133,9 +167,7 @@ class RealESRGANWrapper:
                 input_start_y = max(ofs_y - tile_pad, 0)
                 input_end_y = min(ofs_y + tile_size + tile_pad, height)
 
-                input_tile = img[
-                    :, :, input_start_y:input_end_y, input_start_x:input_end_x
-                ]
+                input_tile = img[:, :, input_start_y:input_end_y, input_start_x:input_end_x]
                 output_tile = self.model(input_tile)
 
                 # Remove padding from output tile
@@ -161,9 +193,9 @@ class RealESRGANWrapper:
                     output_height,
                 )
 
-                output[:, :, dest_start_y:dest_end_y, dest_start_x:dest_end_x] = (
-                    output_tile[:, :, out_start_y:out_end_y, out_start_x:out_end_x]
-                )
+                output[:, :, dest_start_y:dest_end_y, dest_start_x:dest_end_x] = output_tile[
+                    :, :, out_start_y:out_end_y, out_start_x:out_end_x
+                ]
         return output
 
 
@@ -171,7 +203,15 @@ class NAFNetWrapper:
     """Wrapper for NAFNet restoration model — real inference."""
 
     def __init__(self, model_path: str, device: str, variant: str = "denoise") -> None:
+        """Load a NAFNet checkpoint, inferring architecture from keys.
+
+        Args:
+            model_path: Path to the NAFNet checkpoint file.
+            device: Compute device string.
+            variant: Model variant name (informational, architecture is inferred).
+        """
         import re
+
         from models.archs.nafnet_arch import NAFNet
 
         self.device = device
@@ -216,7 +256,15 @@ class NAFNetWrapper:
 
     @staticmethod
     def _count_blocks(state_dict, pattern):
-        """Count blocks per stage from checkpoint key names."""
+        """Count blocks per stage from checkpoint key names.
+
+        Args:
+            state_dict: Model state dict mapping key names to tensors.
+            pattern: Regex with two capture groups: ``(stage_idx, block_idx)``.
+
+        Returns:
+            List of block counts, one per stage, in order.
+        """
         import re
 
         stages: dict[int, int] = {}
@@ -228,11 +276,18 @@ class NAFNetWrapper:
         return [stages[i] for i in range(len(stages))]
 
     def predict(self, image: np.ndarray, **kwargs) -> np.ndarray:
+        """Remove noise or blur from an image using the loaded NAFNet model.
+
+        Args:
+            image: BGR uint8 numpy array.
+            **kwargs: Optional ``tile_size`` (int, unused by NAFNet wrapper).
+
+        Returns:
+            Restored BGR uint8 numpy array.
+        """
         # BGR uint8 -> RGB float32 [0, 1]
         img = image[:, :, ::-1].astype(np.float32) / 255.0
-        img_t = (
-            torch.from_numpy(img.copy()).permute(2, 0, 1).unsqueeze(0).to(self.device)
-        )
+        img_t = torch.from_numpy(img.copy()).permute(2, 0, 1).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
             output = self.model(img_t)
@@ -247,6 +302,13 @@ class CodeFormerWrapper:
     """Wrapper for CodeFormer face restoration model — real inference."""
 
     def __init__(self, model_path: str, device: str, variant: str = "v0.1") -> None:
+        """Load CodeFormer checkpoint and initialize the face detection helper.
+
+        Args:
+            model_path: Path to the CodeFormer checkpoint file.
+            device: Compute device string.
+            variant: Model variant name (informational).
+        """
         from models.archs.codeformer_arch import CodeFormer
 
         self.device = device
@@ -288,6 +350,19 @@ class CodeFormerWrapper:
         )
 
     def predict(self, image: np.ndarray, **kwargs) -> np.ndarray:
+        """Detect and restore faces in an image.
+
+        Detects all faces, restores each via the CodeFormer transformer, and
+        pastes them back into the (optionally upscaled) original. If no faces
+        are detected, returns a bicubic upscale.
+
+        Args:
+            image: BGR uint8 numpy array.
+            **kwargs: Optional ``fidelity`` (float, 0-1) and ``upscale`` (int, 1-4).
+
+        Returns:
+            Face-restored BGR uint8 numpy array.
+        """
         fidelity = kwargs.get("fidelity", 0.5)
         upscale = kwargs.get("upscale", 2)
 

@@ -3,8 +3,8 @@
 ## Project Structure
 
 ```
-photo-en/
-├── main.py                  # FastAPI app, endpoints, model lifecycle
+photo-enhancer/
+├── main.py                  # FastAPI app, v1 router, endpoints, middleware, model lifecycle
 ├── models/
 │   ├── __init__.py
 │   ├── wrappers.py          # Model wrapper classes (DDColor, NAFNet, CodeFormer, RealESRGAN)
@@ -17,12 +17,65 @@ photo-en/
 ├── utils/
 │   ├── __init__.py
 │   ├── downloader.py        # Model weight download & caching
-│   └── image_ops.py         # Image read/validate/resize/encode
-├── requirements.txt         # Python dependencies (PyTorch CUDA 12.1)
-├── Dockerfile               # Container build (python:3.11-slim)
-├── docker-compose.yml       # Compose with GPU reservations + weight volume
+│   ├── image_ops.py         # Image read/validate/resize/encode
+│   └── logging.py           # JSON structured logging setup
+├── tests/
+│   ├── __init__.py
+│   ├── conftest.py          # Shared fixtures (mock models, test client, sample images)
+│   ├── test_image_ops.py    # Unit tests for image operations
+│   ├── test_downloader.py   # Unit tests for downloader
+│   └── test_endpoints.py    # Integration tests for API endpoints
+├── requirements.txt         # Python dependencies (no torch)
+├── requirements-cpu.txt     # CPU torch (used by Docker)
+├── requirements-gpu.txt     # CUDA torch (used for local dev)
+├── requirements-dev.txt     # Dev dependencies (pytest, httpx, ruff)
+├── ruff.toml                # Linter/formatter configuration
+├── pyproject.toml           # pytest configuration
+├── Dockerfile
+├── docker-compose.yml
 ├── CLAUDE.md                # Claude Code instructions
-└── README.md                # Project documentation
+└── docs/                    # Extended documentation
+    ├── api-reference.md
+    ├── architecture.md
+    ├── deployment.md
+    ├── models.md
+    └── development.md
+```
+
+## Running Tests
+
+```bash
+# Install dev dependencies
+pip install -r requirements-dev.txt
+
+# Run all tests
+pytest tests/ -v
+
+# Run a specific test file
+pytest tests/test_image_ops.py -v
+
+# Run with coverage (if pytest-cov installed)
+pytest tests/ --cov=. --cov-report=term-missing
+```
+
+All model inference is mocked in tests — models are too large for CI. The `TestClient` uses a swapped no-op lifespan that pre-populates `model_registry` with `MagicMock` objects returning valid 64x64 BGR images.
+
+## Linting
+
+The project uses [Ruff](https://docs.astral.sh/ruff/) for linting and formatting, configured in `ruff.toml`:
+
+```bash
+# Check for lint issues
+ruff check .
+
+# Auto-fix fixable issues
+ruff check --fix .
+
+# Check formatting
+ruff format --check .
+
+# Format all files
+ruff format .
 ```
 
 ## How to Add a New Model
@@ -93,13 +146,7 @@ class NewModelWrapper:
             state_dict = state_dict["params"]
 
         # Prefer inferring architecture from checkpoint keys
-        # rather than hard-coding per variant
-        num_blocks = 1 + max(
-            int(m.group(1)) for k in state_dict
-            for m in [re.match(r"blocks\.(\d+)\.", k)] if m
-        )
-
-        model = NewModel(num_blocks=num_blocks)
+        model = NewModel(...)
         model.load_state_dict(state_dict, strict=True)
         model.eval()
         model.to(device)
@@ -153,18 +200,22 @@ from models.wrappers import (
 
 ### Step 5: Add endpoint (`main.py`)
 
-Add a POST endpoint following the existing pattern:
+Add a POST endpoint to the `v1_router`:
 
 ```python
-@app.post("/new-endpoint")
+@v1_router.post("/new-endpoint")
 def new_endpoint(
     file: UploadFile = File(...),
     some_param: float = Query(0.5, ge=0.0, le=1.0),
     output_format: str = Query("png", pattern="^(png|jpg|jpeg|webp)$"),
 ):
     try:
-        image = read_image(file.file.read())
+        file_bytes = file.file.read()
+        check_file_size(file_bytes)
+        image = read_image(file_bytes)
         image = validate_and_resize(image)
+    except FileTooLargeError as e:
+        return JSONResponse(status_code=413, content={"detail": str(e)})
     except ValueError as e:
         return JSONResponse(status_code=400, content={"detail": str(e)})
 
@@ -177,6 +228,7 @@ def new_endpoint(
 
     try:
         result = model.predict(image, some_param=some_param)
+        cuda_clear()
         output = encode_image(result, output_format)
         return Response(
             content=output,
@@ -185,11 +237,14 @@ def new_endpoint(
     except ValueError as e:
         return JSONResponse(status_code=400, content={"detail": str(e)})
     except Exception:
-        logger.error("New endpoint error:\n%s", traceback.format_exc())
+        cuda_clear()
+        logger.exception("New endpoint error")
         return JSONResponse(
             status_code=500, content={"detail": "Internal processing error"}
         )
 ```
+
+Don't forget to add the legacy redirect path and update the `_LEGACY_PATHS` list if desired.
 
 ---
 
@@ -204,32 +259,19 @@ All model wrappers share the same interface:
 
 ### Checkpoint Inference
 
-Prefer inferring architecture parameters from checkpoint keys over hard-coding per variant. This makes the wrapper work with any compatible weight file without code changes. Examples:
-
-- Count blocks: `max(int(m.group(1)) for k in state_dict for m in [re.match(pattern, k)] if m)`
-- Read dimensions: `state_dict["layer.weight"].shape[0]`
+Prefer inferring architecture parameters from checkpoint keys over hard-coding per variant. This makes the wrapper work with any compatible weight file without code changes.
 
 ### BGR Arrays
 
-All image I/O uses BGR uint8 numpy arrays (OpenCV convention). Models expect RGB float32 tensors, so wrappers handle the conversion:
-
-```python
-# Input: BGR uint8 → RGB float32 [0,1]
-img = image[:, :, ::-1].astype(np.float32) / 255.0
-img_t = torch.from_numpy(img.copy()).permute(2, 0, 1).unsqueeze(0).to(self.device)
-
-# Output: tensor → RGB float32 → BGR uint8
-output = output.squeeze(0).permute(1, 2, 0).cpu().numpy()
-output = np.clip(output * 255.0, 0, 255).astype(np.uint8)
-output = output[:, :, ::-1].copy()  # RGB → BGR
-```
+All image I/O uses BGR uint8 numpy arrays (OpenCV convention). Models expect RGB float32 tensors, so wrappers handle the conversion.
 
 ### Error Handling
 
 Endpoints use a consistent pattern:
+- `FileTooLargeError` from size check → 413
 - `ValueError` from image ops → 400
 - Model missing from registry → 503
-- Any other exception during predict → 500 with `traceback.format_exc()` logged
+- Any other exception during predict → 500 with `logger.exception()` logged
 
 ---
 
@@ -241,24 +283,33 @@ Endpoints use a consistent pattern:
 # Health
 curl http://localhost:8000/health
 
+# Metrics
+curl http://localhost:8000/metrics
+
 # Colorize
-curl -X POST http://localhost:8000/colorize -F "file=@photo.jpg" -o output.png
+curl -X POST http://localhost:8000/v1/colorize -F "file=@photo.jpg" -o output.png
 
 # Restore
-curl -X POST "http://localhost:8000/restore?tile_size=256" -F "file=@photo.jpg" -o output.png
+curl -X POST "http://localhost:8000/v1/restore?tile_size=256" -F "file=@photo.jpg" -o output.png
 
 # Face restore
-curl -X POST "http://localhost:8000/face-restore?fidelity=0.7&upscale=2" -F "file=@photo.jpg" -o output.png
+curl -X POST "http://localhost:8000/v1/face-restore?fidelity=0.7&upscale=2" -F "file=@photo.jpg" -o output.png
 
 # Upscale
-curl -X POST "http://localhost:8000/upscale?scale=4&tile_size=512" -F "file=@photo.jpg" -o output.png
+curl -X POST "http://localhost:8000/v1/upscale?scale=4&tile_size=512" -F "file=@photo.jpg" -o output.png
+
+# Pipeline
+curl -X POST "http://localhost:8000/v1/pipeline?width=4000" -F "file=@photo.jpg" -o output.png
 ```
 
 ### Checking Specific Errors
 
 ```bash
 # Test invalid image
-curl -X POST http://localhost:8000/colorize -F "file=@README.md" -v
+curl -X POST http://localhost:8000/v1/colorize -F "file=@README.md" -v
+
+# Test file too large (returns 413)
+dd if=/dev/zero bs=1M count=33 | curl -X POST http://localhost:8000/v1/colorize -F "file=@-" -v
 
 # Test with model not loaded (if you set an invalid variant)
 # Should return 503
@@ -271,9 +322,6 @@ curl -X POST http://localhost:8000/colorize -F "file=@README.md" -v
 ### requirements.txt
 
 ```
---extra-index-url https://download.pytorch.org/whl/cu121
-torch>=2.1.0
-torchvision>=0.16.0
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 python-multipart>=0.0.6
@@ -281,13 +329,16 @@ opencv-python-headless>=4.8.0
 requests>=2.31.0
 numpy>=1.24.0
 facexlib>=0.3.0
+python-json-logger>=3.0
+prometheus-fastapi-instrumentator>=7.0
 ```
 
 Key notes:
-- **PyTorch CUDA 12.1**: The `--extra-index-url` line pulls PyTorch with CUDA 12.1 support. For CPU-only, you can remove this line.
-- **opencv-python-headless**: The headless variant avoids pulling in GUI dependencies (not needed for a server).
-- **DDColor is NOT in requirements.txt**: It's installed separately from git with `--no-deps` (see Dockerfile line 20) to avoid the `basicsr` conflict.
-- **facexlib**: Provides RetinaFace face detection used by CodeFormer. Downloads its own detection model on first use.
+- **PyTorch CUDA 12.1**: The `--extra-index-url` line in `requirements-gpu.txt` pulls PyTorch with CUDA 12.1 support.
+- **opencv-python-headless**: The headless variant avoids pulling in GUI dependencies.
+- **DDColor is NOT in requirements.txt**: It's installed separately from git with `--no-deps` to avoid the `basicsr` conflict.
+- **python-json-logger**: Provides JSON-formatted structured logging.
+- **prometheus-fastapi-instrumentator**: Auto-instruments routes and exposes `/metrics`.
 
 ### Adding a New Dependency
 

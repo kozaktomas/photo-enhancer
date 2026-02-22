@@ -220,3 +220,35 @@ First startup downloads all model weights (~1 GB). Subsequent startups should be
 ```bash
 docker volume ls | grep model-weights
 ```
+
+---
+
+## Monitoring
+
+### Prometheus Metrics
+
+The service exposes a `/metrics` endpoint in Prometheus text exposition format. Scrape it with your Prometheus server:
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: photo-enhancer
+    static_configs:
+      - targets: ["localhost:8000"]
+```
+
+Available metrics include:
+- `http_request_duration_seconds` — histogram of request latency
+- `http_requests_total` — counter of total requests by method, handler, and status
+- `http_requests_inprogress` — gauge of in-flight requests
+
+### JSON Structured Logging
+
+All log output is JSON-formatted, making it easy to ingest into log aggregation systems (ELK, Loki, CloudWatch, etc.). Each line is a JSON object with fields: `timestamp`, `level`, `logger`, `message`, plus any extras.
+
+Request logs from the middleware additionally include `method`, `path`, `status_code`, `duration_ms`, and `client_ip` fields.
+
+Example log line:
+```json
+{"timestamp": "2025-01-15 12:00:00", "level": "INFO", "logger": "main", "message": "GET /health 200 1.2ms", "method": "GET", "path": "/health", "status_code": 200, "duration_ms": 1.2, "client_ip": "172.17.0.1"}
+```

@@ -12,6 +12,7 @@ Built with FastAPI and PyTorch. Runs on CUDA GPU or CPU. Vibecoded with [Claude 
 - [Quick Start](#quick-start)
 - [API](#api)
   - [Health Check](#health-check)
+  - [Metrics](#metrics)
   - [Colorize](#colorize)
   - [Restore](#restore)
   - [Face Restore](#face-restore)
@@ -19,6 +20,7 @@ Built with FastAPI and PyTorch. Runs on CUDA GPU or CPU. Vibecoded with [Claude 
   - [Pipeline](#pipeline)
   - [HTTP Status Codes](#http-status-codes)
 - [Environment Variables](#environment-variables)
+- [Testing](#testing)
 - [Project Structure](#project-structure)
 - [Architecture](#architecture)
 - [Notes](#notes)
@@ -28,10 +30,10 @@ Built with FastAPI and PyTorch. Runs on CUDA GPU or CPU. Vibecoded with [Claude 
 
 | Endpoint | Model | Variants |
 |---|---|---|
-| `/colorize` | [DDColor](https://github.com/piddnad/DDColor) | `modelscope` (default), `paper_tiny`, `artistic` |
-| `/restore` | [NAFNet](https://github.com/megvii-research/NAFNet) | `denoise` (default), `deblur` |
-| `/face-restore` | [CodeFormer](https://github.com/sczhou/CodeFormer) | `v0.1` (default) |
-| `/upscale` | [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) | `x4plus` (default), `x4anime`, `x2plus` |
+| `/v1/colorize` | [DDColor](https://github.com/piddnad/DDColor) | `modelscope` (default), `paper_tiny`, `artistic` |
+| `/v1/restore` | [NAFNet](https://github.com/megvii-research/NAFNet) | `denoise` (default), `deblur` |
+| `/v1/face-restore` | [CodeFormer](https://github.com/sczhou/CodeFormer) | `v0.1` (default) |
+| `/v1/upscale` | [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) | `x4plus` (default), `x4anime`, `x2plus` |
 
 Model weights are downloaded automatically on first startup.
 
@@ -39,11 +41,27 @@ Model weights are downloaded automatically on first startup.
 
 ### Docker (recommended)
 
+A pre-built image is available on GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/kozaktomas/photo-enhancer:main
+```
+
+Or build locally:
+
 ```bash
 docker compose up --build
 ```
 
 GPU support requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html). To run on CPU only, set `FORCE_CPU=true` in `docker-compose.yml`.
+
+**Estimated disk usage:**
+
+| Component | Size |
+|---|---|
+| Docker image (Python + PyTorch CPU + deps) | ~2 GB |
+| Model weights (downloaded on first startup) | ~1 GB |
+| **Total** | **~3 GB** |
 
 ### Local
 
@@ -60,7 +78,9 @@ Interactive API docs are auto-generated at [`/docs`](http://localhost:8000/docs)
 
 ## API
 
-All image endpoints accept a file upload via `multipart/form-data` and return the processed image directly in the response body.
+All image endpoints accept a file upload via `multipart/form-data` and return the processed image directly in the response body. Maximum upload size is **32 MB**.
+
+Endpoints are versioned under `/v1`. Legacy un-prefixed paths (`/colorize`, etc.) redirect to their `/v1` equivalents with a 307 status.
 
 ### Health Check
 
@@ -83,12 +103,20 @@ Response:
 }
 ```
 
+### Metrics
+
+Prometheus metrics in text exposition format:
+
+```bash
+curl http://localhost:8000/metrics
+```
+
 ### Colorize
 
 Colorize a grayscale photo.
 
 ```bash
-curl -X POST http://localhost:8000/colorize \
+curl -X POST http://localhost:8000/v1/colorize \
   -F "file=@photo.jpg" \
   -o colorized.png
 ```
@@ -96,14 +124,14 @@ curl -X POST http://localhost:8000/colorize \
 With parameters:
 
 ```bash
-curl -X POST "http://localhost:8000/colorize?render_factor=50&output_format=webp" \
+curl -X POST "http://localhost:8000/v1/colorize?render_factor=50&output_format=webp" \
   -F "file=@photo.jpg" \
   -o colorized.webp
 ```
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `file` | file | required | Input image |
+| `file` | file | required | Input image (max 32 MB) |
 | `render_factor` | int (1-100) | 35 | Controls colorization intensity |
 | `output_format` | string | png | Output format: `png`, `jpg`, `jpeg`, `webp` |
 
@@ -112,7 +140,7 @@ curl -X POST "http://localhost:8000/colorize?render_factor=50&output_format=webp
 Remove noise or blur from a photo.
 
 ```bash
-curl -X POST http://localhost:8000/restore \
+curl -X POST http://localhost:8000/v1/restore \
   -F "file=@noisy_photo.jpg" \
   -o restored.png
 ```
@@ -120,14 +148,14 @@ curl -X POST http://localhost:8000/restore \
 With parameters:
 
 ```bash
-curl -X POST "http://localhost:8000/restore?tile_size=256&output_format=jpg" \
+curl -X POST "http://localhost:8000/v1/restore?tile_size=256&output_format=jpg" \
   -F "file=@noisy_photo.jpg" \
   -o restored.jpg
 ```
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `file` | file | required | Input image |
+| `file` | file | required | Input image (max 32 MB) |
 | `tile_size` | int (>=0) | 0 | Tile size for processing (0 = no tiling). Use tiling to reduce VRAM usage on large images. |
 | `output_format` | string | png | Output format: `png`, `jpg`, `jpeg`, `webp` |
 
@@ -136,7 +164,7 @@ curl -X POST "http://localhost:8000/restore?tile_size=256&output_format=jpg" \
 Enhance and restore faces in a photo.
 
 ```bash
-curl -X POST http://localhost:8000/face-restore \
+curl -X POST http://localhost:8000/v1/face-restore \
   -F "file=@portrait.jpg" \
   -o face_restored.png
 ```
@@ -144,14 +172,14 @@ curl -X POST http://localhost:8000/face-restore \
 With parameters:
 
 ```bash
-curl -X POST "http://localhost:8000/face-restore?fidelity=0.7&upscale=2&output_format=png" \
+curl -X POST "http://localhost:8000/v1/face-restore?fidelity=0.7&upscale=2&output_format=png" \
   -F "file=@portrait.jpg" \
   -o face_restored.png
 ```
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `file` | file | required | Input image |
+| `file` | file | required | Input image (max 32 MB) |
 | `fidelity` | float (0.0-1.0) | 0.5 | Balance between quality and fidelity. Lower = better quality, higher = closer to input. |
 | `upscale` | int (1-4) | 2 | Upscale factor for the output |
 | `output_format` | string | png | Output format: `png`, `jpg`, `jpeg`, `webp` |
@@ -161,7 +189,7 @@ curl -X POST "http://localhost:8000/face-restore?fidelity=0.7&upscale=2&output_f
 Upscale an image using super-resolution.
 
 ```bash
-curl -X POST http://localhost:8000/upscale \
+curl -X POST http://localhost:8000/v1/upscale \
   -F "file=@small_photo.jpg" \
   -o upscaled.png
 ```
@@ -169,31 +197,31 @@ curl -X POST http://localhost:8000/upscale \
 With parameters:
 
 ```bash
-curl -X POST "http://localhost:8000/upscale?scale=4&tile_size=512&output_format=webp" \
+curl -X POST "http://localhost:8000/v1/upscale?scale=4&tile_size=512&output_format=webp" \
   -F "file=@small_photo.jpg" \
   -o upscaled.webp
 ```
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `file` | file | required | Input image |
+| `file` | file | required | Input image (max 32 MB) |
 | `scale` | int (1-8) | 4 | Upscale factor |
 | `tile_size` | int (>=0) | 512 | Tile size for processing (0 = no tiling). Use tiling to reduce VRAM usage on large images. |
 | `output_format` | string | png | Output format: `png`, `jpg`, `jpeg`, `webp` |
 
 ### Pipeline
 
-Run multiple processing steps in a single request. Order: colorize → restore → upscale → face restore.
+Run multiple processing steps in a single request. Order: colorize -> restore -> upscale -> face restore.
 
 ```bash
-curl -X POST "http://localhost:8000/pipeline?width=4000&output_format=png" \
+curl -X POST "http://localhost:8000/v1/pipeline?width=4000&output_format=png" \
   -F "file=@photo.jpg" \
   -o pipeline_output.png
 ```
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `file` | file | required | Input image |
+| `file` | file | required | Input image (max 32 MB) |
 | `colorize` | bool | true | Enable colorization step |
 | `restore` | bool | true | Enable restoration step |
 | `face_restore` | bool | true | Enable face restoration step |
@@ -212,6 +240,7 @@ curl -X POST "http://localhost:8000/pipeline?width=4000&output_format=png" \
 |---|---|---|
 | `200` | Success | Image processed and returned successfully |
 | `400` | Bad Request | Invalid image file, unsupported format, or invalid parameter values |
+| `413` | Payload Too Large | Uploaded file exceeds the 32 MB limit |
 | `500` | Internal Error | Unexpected error during model inference |
 | `503` | Service Unavailable | Requested model failed to load at startup |
 
@@ -231,11 +260,25 @@ Error responses return JSON:
 | `MODEL_UPSCALE` | `x4plus` | Real-ESRGAN variant (`x4plus`, `x4anime`, `x2plus`) |
 | `FORCE_CPU` | `false` | Force CPU inference even if CUDA is available |
 
+## Testing
+
+```bash
+# Using make (recommended)
+make test          # run tests
+make lint          # check linting + formatting
+make check         # both lint and test
+
+# Or manually
+pip install -r requirements-dev.txt
+pytest tests/ -v
+ruff check . && ruff format --check .
+```
+
 ## Project Structure
 
 ```
 photo-enhancer/
-├── main.py                  # FastAPI app, endpoints, model lifecycle
+├── main.py                  # FastAPI app, v1 router, endpoints, middleware
 ├── models/
 │   ├── wrappers.py          # Model wrapper classes (predict interface)
 │   └── archs/               # Vendored PyTorch architecture definitions
@@ -245,10 +288,19 @@ photo-enhancer/
 │       └── vqgan_arch.py     #   VQ-GAN autoencoder (used by CodeFormer)
 ├── utils/
 │   ├── downloader.py        # Model weight downloader (HF/GitHub/GDrive)
-│   └── image_ops.py         # Image read/validate/resize/encode
+│   ├── image_ops.py         # Image read/validate/resize/encode
+│   └── logging.py           # JSON structured logging setup
+├── tests/                   # pytest test suite
+│   ├── conftest.py          # Shared fixtures
+│   ├── test_image_ops.py    # Image operations unit tests
+│   ├── test_downloader.py   # Downloader unit tests
+│   └── test_endpoints.py    # API endpoint integration tests
 ├── requirements.txt         # Shared deps (no torch)
 ├── requirements-cpu.txt     # CPU torch (used by Docker)
 ├── requirements-gpu.txt     # CUDA torch (used for local dev)
+├── requirements-dev.txt     # Dev deps (pytest, httpx, ruff)
+├── ruff.toml                # Linter/formatter config
+├── pyproject.toml           # pytest config
 ├── Dockerfile
 ├── docker-compose.yml
 └── docs/                    # Extended documentation
@@ -271,8 +323,11 @@ Dependencies:
 ## Notes
 
 - Images larger than 2048px on either side are automatically resized before processing.
+- Uploads larger than 32 MB are rejected with HTTP 413.
 - Model weights are stored in `/app/weights` (Docker) and cached across restarts via a named volume.
 - Google Drive downloads (NAFNet weights) are handled via `drive.usercontent.google.com` to bypass virus-scan interstitials.
+- All log output is JSON-structured for easy integration with log aggregation systems.
+- Prometheus metrics are available at `/metrics`.
 
 ## Documentation
 

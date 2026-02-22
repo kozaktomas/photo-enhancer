@@ -124,9 +124,7 @@ class VectorQuantizer(nn.Module):
         min_encoding_indices = torch.argmin(d, dim=1)
         z_q = self.embedding(min_encoding_indices).view(z.shape)
 
-        loss = self.beta * torch.mean((z_q.detach() - z) ** 2) + torch.mean(
-            (z_q - z.detach()) ** 2
-        )
+        loss = self.beta * torch.mean((z_q.detach() - z) ** 2) + torch.mean((z_q - z.detach()) ** 2)
         z_q = z + (z_q - z).detach()
         z_q = z_q.permute(0, 3, 1, 2).contiguous()
 

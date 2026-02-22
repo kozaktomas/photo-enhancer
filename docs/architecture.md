@@ -5,19 +5,24 @@
 ```
 Client
   │
-  │  POST /colorize, /restore, /face-restore, /upscale
+  │  POST /v1/colorize, /v1/restore, /v1/face-restore, /v1/upscale, /v1/pipeline
   │  (multipart/form-data with image file)
   ▼
 ┌─────────────────────────────────────────────────────────┐
 │  FastAPI (main.py)                                      │
 │                                                         │
-│  1. read_image(file_bytes)         → numpy BGR array    │
-│  2. validate_and_resize(image)     → max 2048px         │
-│  3. model_registry[category]       → get wrapper        │
-│  4. wrapper.predict(image, **kw)   → numpy BGR array    │
-│  5. encode_image(result, format)   → bytes (PNG/JPG/…)  │
-│  6. Response(content, media_type)  → HTTP response      │
+│  RequestLoggingMiddleware  → JSON structured logs        │
+│  Prometheus Instrumentator → /metrics                   │
 │                                                         │
+│  1. check_file_size(bytes) → reject if > 32 MB (413)   │
+│  2. read_image(file_bytes) → numpy BGR array            │
+│  3. validate_and_resize(image) → max 2048px             │
+│  4. model_registry[category] → get wrapper              │
+│  5. wrapper.predict(image, **kw) → numpy BGR array      │
+│  6. encode_image(result, format) → bytes (PNG/JPG/…)    │
+│  7. Response(content, media_type) → HTTP response       │
+│                                                         │
+│  /v1 router + legacy 307 redirects                      │
 └─────────────────────────────────────────────────────────┘
          │                                ▲
          ▼                                │
@@ -27,11 +32,11 @@ Client
 │                 │            │  resize / encode     │
 │  DDColorWrapper │            └──────────────────────┘
 │  NAFNetWrapper  │
-│  CodeFormer…    │
-│  RealESRGAN…    │
-└────────┬────────┘
-         │
-         ▼
+│  CodeFormer…    │            ┌──────────────────────┐
+│  RealESRGAN…    │            │  utils/logging.py    │
+└────────┬────────┘            │  JSON structured     │
+         │                     │  logging setup       │
+         ▼                     └──────────────────────┘
 ┌─────────────────┐
 │  models/archs/  │
 │  (PyTorch       │
@@ -55,8 +60,16 @@ The FastAPI application. Responsibilities:
 
 - **Lifespan management**: The `lifespan` async context manager runs on startup/shutdown. On startup it detects the device (CUDA/CPU), iterates `MODEL_CONFIG`, downloads weights via `ensure_model_exists()`, and instantiates wrapper objects into the global `model_registry` dict. On shutdown it clears the registry and empties the CUDA cache.
 - **Model config**: `MODEL_CONFIG` maps each category (`colorize`, `restore`, `face`, `upscale`) to its environment variable name, default variant, and wrapper class.
-- **Endpoints**: Four `POST` endpoints, each following the identical pattern: decode → validate → predict → encode → respond. One `GET /health` endpoint.
-- **Error handling**: `ValueError` → 400, model missing → 503, other exceptions → 500 with logging.
+- **API versioning**: All image processing endpoints live on a `/v1` router. Legacy un-prefixed paths return 307 redirects to their `/v1` equivalents.
+- **File size validation**: `check_file_size()` rejects uploads exceeding 32 MB with HTTP 413.
+- **Request logging**: `RequestLoggingMiddleware` logs every request with method, path, status code, duration, and client IP as structured JSON.
+- **Prometheus metrics**: `prometheus-fastapi-instrumentator` auto-instruments all routes and exposes `GET /metrics`. `/health` and `/metrics` are excluded from instrumentation.
+- **Endpoints**: Five `POST` endpoints on the `/v1` router, each following the identical pattern: size check → decode → validate → predict → encode → respond. One `GET /health` and one `GET /metrics` at root.
+- **Error handling**: `FileTooLargeError` → 413, `ValueError` → 400, model missing → 503, other exceptions → 500 with `logger.exception()`.
+
+### `utils/logging.py`
+
+Configures structured JSON logging using `python-json-logger`. The `setup_logging()` function replaces the default `logging.basicConfig()` with a `JsonFormatter` that outputs one JSON object per line to stdout with fields: `timestamp`, `level`, `logger`, `message`, plus any extras.
 
 ### `models/wrappers.py`
 
@@ -113,11 +126,31 @@ Three functions for image I/O:
 
 ---
 
+## Request Flow
+
+```
+POST /v1/colorize (file + query params)
+  │
+  ├─ RequestLoggingMiddleware: start timer
+  ├─ Prometheus Instrumentator: track request
+  │
+  ├─ check_file_size(file_bytes) → 413 if > 32 MB
+  ├─ read_image(file_bytes) → 400 if invalid
+  ├─ validate_and_resize(image) → resize if > 2048px
+  ├─ get_model("colorize") → 503 if not loaded
+  ├─ model.predict(image, **kwargs) → 500 if exception
+  ├─ encode_image(result, format) → 400 if format unsupported
+  └─ Response(content, media_type)
+```
+
+---
+
 ## Model Loading Lifecycle
 
 ```
 Server start
   │
+  ├─ setup_logging() → configure JSON structured logging
   ├─ detect_device()
   │    └─ Check FORCE_CPU env → check torch.cuda.is_available()
   │
@@ -188,22 +221,26 @@ DDColor is installed with `--no-deps` from git to prevent it from pulling in con
 
 All endpoints follow the same pipeline:
 
-### 1. Decode
+### 1. Size Check
+
+`check_file_size(file_bytes)` → Rejects uploads exceeding 32 MB with HTTP 413.
+
+### 2. Decode
 
 `read_image(file_bytes)` → Uses `cv2.imdecode` on raw bytes. Returns BGR uint8 numpy array or raises `ValueError`.
 
-### 2. Validate & Resize
+### 3. Validate & Resize
 
 `validate_and_resize(image, max_dim=2048)` → If either dimension exceeds 2048px, scales down proportionally using `cv2.INTER_AREA` interpolation.
 
-### 3. Predict
+### 4. Predict
 
 `wrapper.predict(image, **kwargs)` → Model-specific inference. All wrappers:
 - Accept BGR uint8 numpy array
 - Convert to RGB float32 tensor for model input
 - Convert model output back to BGR uint8 numpy array
 
-### 4. Encode
+### 5. Encode
 
 `encode_image(result, output_format)` → Uses `cv2.imencode`. JPEG and WebP use quality 95.
 
@@ -234,3 +271,21 @@ The `CodeFormerWrapper` uses `facexlib.FaceRestoreHelper` for a multi-stage pipe
 5. **Paste-back**: Restored faces are inverse-affine-transformed and blended back into the (optionally upscaled) original image
 
 If no faces are detected, the image is returned with a simple bicubic upscale.
+
+---
+
+## Observability
+
+### JSON Structured Logging
+
+All log output is JSON-formatted (one object per line) via `python-json-logger`. Each log entry includes `timestamp`, `level`, `logger`, and `message` fields, plus any extras. Request logs from the middleware additionally include `method`, `path`, `status_code`, `duration_ms`, and `client_ip`.
+
+### Prometheus Metrics
+
+The `/metrics` endpoint exposes standard Prometheus metrics via `prometheus-fastapi-instrumentator`:
+
+- `http_request_duration_seconds` — histogram of request latency
+- `http_requests_total` — counter of total requests
+- `http_requests_inprogress` — gauge of in-flight requests
+
+The `/health` and `/metrics` endpoints are excluded from instrumentation.

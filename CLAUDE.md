@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 REST API for AI-powered photo enhancement (colorization, restoration, face restoration, upscaling) built with FastAPI and PyTorch. Runs on CUDA GPU or CPU.
 
+## Workflow
+
+**Always run `make check` after every change.** This runs both linting and tests. Do not consider a change complete until `make check` passes.
+
 ## Commands
 
 ### Run locally
@@ -24,9 +28,20 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 docker compose up --build
 ```
 
+### Run tests
+```bash
+pip install -r requirements-dev.txt
+pytest tests/ -v
+```
+
+### Lint
+```bash
+ruff check . && ruff format --check .
+```
+
 ### Test endpoints
 ```bash
-curl -X POST http://localhost:8000/colorize -F "file=@photo.jpg" -o colorized.png
+curl -X POST http://localhost:8000/v1/colorize -F "file=@photo.jpg" -o colorized.png
 ```
 
 API docs are auto-generated at `/docs` (Swagger) and `/redoc`.
@@ -34,22 +49,24 @@ API docs are auto-generated at `/docs` (Swagger) and `/redoc`.
 ## Architecture
 
 ### Request flow
-`POST /endpoint` → `read_image` → `validate_and_resize` (max 2048px) → model wrapper `.predict()` → `encode_image` → `Response`
+`POST /v1/endpoint` → `check_file_size` (max 32 MB) → `read_image` → `validate_and_resize` (max 2048px) → model wrapper `.predict()` → `encode_image` → `Response`
 
 ### Key modules
 
-- **`main.py`** — FastAPI app with lifespan startup/shutdown. Holds the global `model_registry` dict and `device` string. All 4 POST endpoints follow the same pattern: decode image, validate, run model, encode output.
+- **`main.py`** — FastAPI app with lifespan startup/shutdown. Holds the global `model_registry` dict and `device` string. All 5 POST endpoints live on a `/v1` router and follow the same pattern: size check, decode image, validate, run model, encode output. Legacy un-prefixed paths redirect with 307. Includes `RequestLoggingMiddleware` for JSON request logging and Prometheus instrumentation via `prometheus-fastapi-instrumentator`.
 - **`models/wrappers.py`** — Wrapper classes (`DDColorWrapper`, `NAFNetWrapper`, `CodeFormerWrapper`, `RealESRGANWrapper`). Each takes `(model_path, device, variant)` and exposes `predict(image, **kwargs)` returning a numpy BGR array. NAFNet and RealESRGAN infer their architecture (block counts, width, scale) from checkpoint keys — no hard-coded configs per variant. CodeFormer uses `facexlib` for face detection/alignment.
 - **`models/archs/`** — Vendored PyTorch `nn.Module` architecture definitions (`RRDBNet`, `NAFNet`, `VQAutoEncoder`, `CodeFormer`). These avoid depending on `basicsr>=1.4.2` which would conflict with the DDColor dependency.
 - **`utils/downloader.py`** — `ensure_model_exists(category, variant)` downloads weights from HuggingFace/GitHub/Google Drive into `/app/weights/<category>/` with `.part` file handling. Google Drive URLs are resolved via `drive.usercontent.google.com` to bypass virus-scan interstitials. Downloaded files are validated to reject corrupt HTML responses.
 - **`utils/image_ops.py`** — `read_image(bytes)`, `validate_and_resize(img)`, `encode_image(img, format)`. All operate on numpy arrays via OpenCV.
+- **`utils/logging.py`** — `setup_logging()` configures root logger with `python-json-logger` for JSON structured output to stdout. Fields: `timestamp`, `level`, `logger`, `message`, plus extras.
 
 ### Error handling pattern
 
 All endpoints follow the same error convention:
+- **413** — File exceeds 32 MB size limit. Returns `{"detail": "File too large (X.X MB). Maximum allowed size is 32 MB."}`.
 - **400** — `ValueError` from image decoding (`read_image`), validation (`validate_and_resize`), encoding (`encode_image`), or model-specific input issues. Returns `{"detail": "<message>"}`.
 - **503** — Model not present in `model_registry` (failed to load at startup). Returns `{"detail": "<Model> model not loaded"}`.
-- **500** — Unexpected exception during `model.predict()`. Logged with full traceback, returns `{"detail": "Internal processing error"}`.
+- **500** — Unexpected exception during `model.predict()`. Logged with `logger.exception()`, returns `{"detail": "Internal processing error"}`.
 
 ### Model loading
 
@@ -60,7 +77,8 @@ Models load during FastAPI lifespan startup. Variants are selected via environme
 2. Add the PyTorch architecture module in `models/archs/` if not available via pip
 3. Create a wrapper class in `models/wrappers.py` with `__init__(model_path, device, variant)` and `predict(image, **kwargs)` — prefer inferring architecture params from checkpoint keys over hard-coding per variant
 4. Add config entry to `MODEL_CONFIG` in `main.py`
-5. Add the POST endpoint in `main.py` following the existing pattern
+5. Add the POST endpoint to `v1_router` in `main.py` following the existing pattern (include `check_file_size`, `FileTooLargeError` handling)
+6. Optionally add the legacy redirect path to `_LEGACY_PATHS`
 
 ## Dependencies
 
@@ -68,6 +86,9 @@ Models load during FastAPI lifespan startup. Variants are selected via environme
 - **DDColor**: Installed from git (`pip install --no-deps git+https://github.com/piddnad/DDColor.git`) with `--no-deps` because DDColor's pip package pulls `basicsr==1.3.4.6`.
 - **Vendored architectures**: NAFNet, RealESRGAN (RRDBNet), CodeFormer, and VQ-GAN architectures are vendored in `models/archs/` to avoid requiring `basicsr>=1.4.2`, which would conflict with the DDColor dependency.
 - **facexlib**: Used by CodeFormer for face detection (RetinaFace) and alignment. Downloads its own detection model weights on first use (stored in `TORCH_HOME`).
+- **python-json-logger**: JSON structured logging formatter.
+- **prometheus-fastapi-instrumentator**: Auto-instruments routes and exposes `/metrics` endpoint.
+- **Dev deps** (`requirements-dev.txt`): `pytest`, `httpx`, `ruff`.
 
 ## Docker
 

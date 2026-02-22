@@ -1,19 +1,27 @@
+"""Photo AI Processing Service — FastAPI application.
+
+REST API for AI-powered photo enhancement: colorization, restoration,
+face restoration, and upscaling. Models load at startup and are served
+via versioned POST endpoints under ``/v1``.
+"""
+
 import logging
 import os
-import traceback
+import time
 import warnings
 from contextlib import asynccontextmanager
 
-warnings.filterwarnings(
-    "ignore", message=".*weights_only=False.*", category=FutureWarning
-)
+warnings.filterwarnings("ignore", message=".*weights_only=False.*", category=FutureWarning)
 warnings.filterwarnings("ignore", message=".*pretrained.*", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*weight enum.*", category=UserWarning)
 
 import cv2  # noqa: E402
 import torch  # noqa: E402
-from fastapi import FastAPI, File, Query, UploadFile  # noqa: E402
-from fastapi.responses import JSONResponse, Response  # noqa: E402
+from fastapi import APIRouter, FastAPI, File, Query, UploadFile  # noqa: E402
+from fastapi.responses import JSONResponse, RedirectResponse, Response  # noqa: E402
+from prometheus_fastapi_instrumentator import Instrumentator  # noqa: E402
+from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
+from starlette.requests import Request  # noqa: E402
 
 from models.wrappers import (  # noqa: E402
     CodeFormerWrapper,
@@ -23,15 +31,15 @@ from models.wrappers import (  # noqa: E402
 )
 from utils.downloader import ensure_model_exists  # noqa: E402
 from utils.image_ops import encode_image, read_image, validate_and_resize  # noqa: E402
+from utils.logging import setup_logging  # noqa: E402
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+setup_logging()
 logger = logging.getLogger(__name__)
 
 model_registry: dict[str, object] = {}
 device: str = "cpu"
+
+MAX_FILE_SIZE = 32 * 1024 * 1024  # 32 MB
 
 MEDIA_TYPES = {
     "png": "image/png",
@@ -42,6 +50,13 @@ MEDIA_TYPES = {
 
 
 def detect_device() -> str:
+    """Detect the best available compute device and set the global ``device`` variable.
+
+    Checks ``FORCE_CPU`` env var first, then CUDA, then MPS, falling back to CPU.
+
+    Returns:
+        The device string (``"cuda"``, ``"mps"``, or ``"cpu"``).
+    """
     global device
     force_cpu = os.environ.get("FORCE_CPU", "false").lower() in ("true", "1", "yes")
     if force_cpu:
@@ -89,6 +104,12 @@ MODEL_CONFIG = {
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Manage application startup and shutdown.
+
+    On startup: detects the compute device, downloads model weights (if needed),
+    instantiates wrapper objects, and populates ``model_registry``.
+    On shutdown: clears the registry and frees CUDA memory.
+    """
     detect_device()
 
     for category, cfg in MODEL_CONFIG.items():
@@ -99,16 +120,9 @@ async def lifespan(app: FastAPI):
             model_registry[category] = wrapper
             logger.info("Loaded model: %s/%s", category, variant)
         except Exception:
-            logger.error(
-                "Failed to load model %s/%s:\n%s",
-                category,
-                variant,
-                traceback.format_exc(),
-            )
+            logger.exception("Failed to load model %s/%s", category, variant)
 
-    logger.info(
-        "Startup complete — %d/%d models loaded", len(model_registry), len(MODEL_CONFIG)
-    )
+    logger.info("Startup complete — %d/%d models loaded", len(model_registry), len(MODEL_CONFIG))
     yield
 
     model_registry.clear()
@@ -124,26 +138,125 @@ app = FastAPI(
 )
 
 
+# ---------------------------------------------------------------------------
+# Request logging middleware
+# ---------------------------------------------------------------------------
+
+
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    """Middleware that logs every HTTP request with method, path, status, and duration."""
+
+    async def dispatch(self, request: Request, call_next):
+        start = time.perf_counter()
+        response = await call_next(request)
+        duration_ms = (time.perf_counter() - start) * 1000
+        logger.info(
+            "%s %s %d %.1fms",
+            request.method,
+            request.url.path,
+            response.status_code,
+            duration_ms,
+            extra={
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": response.status_code,
+                "duration_ms": round(duration_ms, 1),
+                "client_ip": request.client.host if request.client else None,
+            },
+        )
+        return response
+
+
+app.add_middleware(RequestLoggingMiddleware)
+
+
+# ---------------------------------------------------------------------------
+# Prometheus metrics
+# ---------------------------------------------------------------------------
+
+instrumentator = Instrumentator(
+    should_ignore_untemplated=True,
+    excluded_handlers=["/metrics", "/health"],
+)
+instrumentator.instrument(app).expose(app, endpoint="/metrics", include_in_schema=True)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
 def get_model(name: str):
+    """Look up a model wrapper by category name.
+
+    Args:
+        name: Model category key (e.g. ``"colorize"``, ``"restore"``).
+
+    Returns:
+        The model wrapper instance, or ``None`` if the model is not loaded.
+    """
     if name not in model_registry:
         return None
     return model_registry[name]
 
 
 def cuda_clear():
+    """Free CUDA cache memory if the current device is CUDA."""
     if device == "cuda":
         torch.cuda.empty_cache()
 
 
-@app.post("/colorize")
+def check_file_size(file_bytes: bytes) -> None:
+    """Reject uploads that exceed the maximum allowed file size.
+
+    Args:
+        file_bytes: Raw uploaded file content.
+
+    Raises:
+        JSONResponse: 413 status if the file exceeds ``MAX_FILE_SIZE``.
+    """
+    if len(file_bytes) > MAX_FILE_SIZE:
+        size_mb = len(file_bytes) / (1024 * 1024)
+        max_mb = MAX_FILE_SIZE / (1024 * 1024)
+        raise FileTooLargeError(
+            f"File too large ({size_mb:.1f} MB). Maximum allowed size is {max_mb:.0f} MB."
+        )
+
+
+class FileTooLargeError(Exception):
+    """Raised when an uploaded file exceeds the size limit."""
+
+
+# ---------------------------------------------------------------------------
+# v1 API router
+# ---------------------------------------------------------------------------
+
+v1_router = APIRouter(prefix="/v1", tags=["v1"])
+
+
+@v1_router.post("/colorize")
 def colorize(
     file: UploadFile = File(...),
     render_factor: int = Query(35, ge=1, le=100),
     output_format: str = Query("png", pattern="^(png|jpg|jpeg|webp)$"),
 ):
+    """Colorize a grayscale or black-and-white photo using the DDColor model.
+
+    Args:
+        file: Input image file (JPEG, PNG, WebP, etc.).
+        render_factor: Controls colorization intensity (1-100).
+        output_format: Desired output image format.
+
+    Returns:
+        The colorized image as binary content.
+    """
     try:
-        image = read_image(file.file.read())
+        file_bytes = file.file.read()
+        check_file_size(file_bytes)
+        image = read_image(file_bytes)
         image = validate_and_resize(image)
+    except FileTooLargeError as e:
+        return JSONResponse(status_code=413, content={"detail": str(e)})
     except ValueError as e:
         return JSONResponse(status_code=400, content={"detail": str(e)})
 
@@ -166,21 +279,33 @@ def colorize(
         return JSONResponse(status_code=400, content={"detail": str(e)})
     except Exception:
         cuda_clear()
-        logger.error("Colorize error:\n%s", traceback.format_exc())
-        return JSONResponse(
-            status_code=500, content={"detail": "Internal processing error"}
-        )
+        logger.exception("Colorize error")
+        return JSONResponse(status_code=500, content={"detail": "Internal processing error"})
 
 
-@app.post("/restore")
+@v1_router.post("/restore")
 def restore(
     file: UploadFile = File(...),
     tile_size: int = Query(0, ge=0),
     output_format: str = Query("png", pattern="^(png|jpg|jpeg|webp)$"),
 ):
+    """Remove noise or blur from a photo using the NAFNet model.
+
+    Args:
+        file: Input image file.
+        tile_size: Tile size for processing (0 = no tiling).
+        output_format: Desired output image format.
+
+    Returns:
+        The restored image as binary content.
+    """
     try:
-        image = read_image(file.file.read())
+        file_bytes = file.file.read()
+        check_file_size(file_bytes)
+        image = read_image(file_bytes)
         image = validate_and_resize(image)
+    except FileTooLargeError as e:
+        return JSONResponse(status_code=413, content={"detail": str(e)})
     except ValueError as e:
         return JSONResponse(status_code=400, content={"detail": str(e)})
 
@@ -203,22 +328,38 @@ def restore(
         return JSONResponse(status_code=400, content={"detail": str(e)})
     except Exception:
         cuda_clear()
-        logger.error("Restore error:\n%s", traceback.format_exc())
-        return JSONResponse(
-            status_code=500, content={"detail": "Internal processing error"}
-        )
+        logger.exception("Restore error")
+        return JSONResponse(status_code=500, content={"detail": "Internal processing error"})
 
 
-@app.post("/face-restore")
+@v1_router.post("/face-restore")
 def face_restore(
     file: UploadFile = File(...),
     fidelity: float = Query(0.5, ge=0.0, le=1.0),
     upscale: int = Query(2, ge=1, le=4),
     output_format: str = Query("png", pattern="^(png|jpg|jpeg|webp)$"),
 ):
+    """Enhance and restore faces in a photo using the CodeFormer model.
+
+    Detects all faces, restores each one, and pastes them back. Returns a
+    bicubic upscale if no faces are detected.
+
+    Args:
+        file: Input image file.
+        fidelity: Quality vs fidelity balance (0.0-1.0).
+        upscale: Output upscale factor (1-4).
+        output_format: Desired output image format.
+
+    Returns:
+        The face-restored image as binary content.
+    """
     try:
-        image = read_image(file.file.read())
+        file_bytes = file.file.read()
+        check_file_size(file_bytes)
+        image = read_image(file_bytes)
         image = validate_and_resize(image)
+    except FileTooLargeError as e:
+        return JSONResponse(status_code=413, content={"detail": str(e)})
     except ValueError as e:
         return JSONResponse(status_code=400, content={"detail": str(e)})
 
@@ -241,22 +382,35 @@ def face_restore(
         return JSONResponse(status_code=400, content={"detail": str(e)})
     except Exception:
         cuda_clear()
-        logger.error("Face restore error:\n%s", traceback.format_exc())
-        return JSONResponse(
-            status_code=500, content={"detail": "Internal processing error"}
-        )
+        logger.exception("Face restore error")
+        return JSONResponse(status_code=500, content={"detail": "Internal processing error"})
 
 
-@app.post("/upscale")
+@v1_router.post("/upscale")
 def upscale(
     file: UploadFile = File(...),
     scale: int = Query(4, ge=1, le=8),
     tile_size: int = Query(512, ge=0),
     output_format: str = Query("png", pattern="^(png|jpg|jpeg|webp)$"),
 ):
+    """Upscale an image using the Real-ESRGAN super-resolution model.
+
+    Args:
+        file: Input image file.
+        scale: Desired upscale factor (1-8).
+        tile_size: Tile size for processing (0 = no tiling).
+        output_format: Desired output image format.
+
+    Returns:
+        The upscaled image as binary content.
+    """
     try:
-        image = read_image(file.file.read())
+        file_bytes = file.file.read()
+        check_file_size(file_bytes)
+        image = read_image(file_bytes)
         image = validate_and_resize(image)
+    except FileTooLargeError as e:
+        return JSONResponse(status_code=413, content={"detail": str(e)})
     except ValueError as e:
         return JSONResponse(status_code=400, content={"detail": str(e)})
 
@@ -279,13 +433,11 @@ def upscale(
         return JSONResponse(status_code=400, content={"detail": str(e)})
     except Exception:
         cuda_clear()
-        logger.error("Upscale error:\n%s", traceback.format_exc())
-        return JSONResponse(
-            status_code=500, content={"detail": "Internal processing error"}
-        )
+        logger.exception("Upscale error")
+        return JSONResponse(status_code=500, content={"detail": "Internal processing error"})
 
 
-@app.post("/pipeline")
+@v1_router.post("/pipeline")
 def pipeline(
     file: UploadFile = File(...),
     restore: bool = Query(True),
@@ -304,9 +456,34 @@ def pipeline(
     # upscale params
     upscale_tile_size: int = Query(512, ge=0),
 ):
+    """Run multiple enhancement steps in a single request.
+
+    Pipeline order: colorize -> restore -> upscale -> resize -> face restore.
+
+    Args:
+        file: Input image file.
+        restore: Enable restoration step.
+        face_restore: Enable face restoration step.
+        colorize: Enable colorization step.
+        upscale: Enable upscale step.
+        width: Target output width.
+        height: Target output height.
+        output_format: Desired output image format.
+        render_factor: Colorization intensity (1-100).
+        restore_tile_size: Tile size for restoration (0 = no tiling).
+        fidelity: Face restoration fidelity (0.0-1.0).
+        upscale_tile_size: Tile size for upscaling (0 = no tiling).
+
+    Returns:
+        The processed image as binary content.
+    """
     try:
-        image = read_image(file.file.read())
+        file_bytes = file.file.read()
+        check_file_size(file_bytes)
+        image = read_image(file_bytes)
         image = validate_and_resize(image)
+    except FileTooLargeError as e:
+        return JSONResponse(status_code=413, content={"detail": str(e)})
     except ValueError as e:
         return JSONResponse(status_code=400, content={"detail": str(e)})
 
@@ -335,22 +512,16 @@ def pipeline(
 
     try:
         if colorize:
-            image = model_registry["colorize"].predict(
-                image, render_factor=render_factor
-            )
+            image = model_registry["colorize"].predict(image, render_factor=render_factor)
             cuda_clear()
         if restore:
-            image = model_registry["restore"].predict(
-                image, tile_size=restore_tile_size
-            )
+            image = model_registry["restore"].predict(image, tile_size=restore_tile_size)
             cuda_clear()
 
         h, w = image.shape[:2]
         target = max(width, height)
         if upscale and max(w, h) < target:
-            image = model_registry["upscale"].predict(
-                image, tile_size=upscale_tile_size
-            )
+            image = model_registry["upscale"].predict(image, tile_size=upscale_tile_size)
             cuda_clear()
             h, w = image.shape[:2]
 
@@ -374,21 +545,54 @@ def pipeline(
         return JSONResponse(status_code=400, content={"detail": str(e)})
     except Exception:
         cuda_clear()
-        logger.error("Pipeline error:\n%s", traceback.format_exc())
-        return JSONResponse(
-            status_code=500, content={"detail": "Internal processing error"}
-        )
+        logger.exception("Pipeline error")
+        return JSONResponse(status_code=500, content={"detail": "Internal processing error"})
+
+
+app.include_router(v1_router)
+
+
+# ---------------------------------------------------------------------------
+# Legacy redirects (307 preserves POST method and body)
+# ---------------------------------------------------------------------------
+
+_LEGACY_PATHS = ["/colorize", "/restore", "/face-restore", "/upscale", "/pipeline"]
+
+
+for _path in _LEGACY_PATHS:
+
+    def _make_redirect(p: str):
+        async def _redirect(request: Request):
+            url = request.url.replace(path=f"/v1{p}")
+            return RedirectResponse(url=str(url), status_code=307)
+
+        return _redirect
+
+    app.add_api_route(
+        _path,
+        _make_redirect(_path),
+        methods=["POST"],
+        include_in_schema=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Infrastructure endpoints (root, not versioned)
+# ---------------------------------------------------------------------------
 
 
 @app.get("/health")
 def health():
+    """Return server health status, device info, and loaded models.
+
+    Returns:
+        JSON with status, device, loaded model list, and optional CUDA info.
+    """
     cuda_info = None
     if torch.cuda.is_available():
         cuda_info = {
             "gpu_name": torch.cuda.get_device_name(0),
-            "vram_total_gb": round(
-                torch.cuda.get_device_properties(0).total_memory / (1024**3), 2
-            ),
+            "vram_total_gb": round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 2),
             "vram_used_gb": round(torch.cuda.memory_allocated(0) / (1024**3), 2),
         }
 
