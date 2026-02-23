@@ -17,6 +17,7 @@ class TestHealthEndpoint:
             "face",
             "upscale",
             "old_photo_restore",
+            "inpaint",
         }
 
 
@@ -150,6 +151,79 @@ class TestOldPhotoRestoreEndpoint:
         assert resp.json()["detail"] == "Internal processing error"
 
 
+class TestInpaintEndpoint:
+    POINTS = "[[10,10],[50,10],[50,50],[10,50]]"
+
+    def test_success(self, client, sample_image_bytes):
+        resp = client.post(
+            f"/v1/inpaint?points={self.POINTS}",
+            files={"file": ("test.jpg", sample_image_bytes)},
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "image/png"
+
+    def test_webp_output(self, client, sample_image_bytes):
+        resp = client.post(
+            f"/v1/inpaint?points={self.POINTS}&output_format=webp",
+            files={"file": ("test.jpg", sample_image_bytes)},
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "image/webp"
+
+    def test_invalid_image_returns_400(self, client):
+        resp = client.post(
+            f"/v1/inpaint?points={self.POINTS}",
+            files={"file": ("bad.jpg", b"not an image")},
+        )
+        assert resp.status_code == 400
+
+    def test_invalid_points_returns_400(self, client, sample_image_bytes):
+        resp = client.post(
+            "/v1/inpaint?points=not-json",
+            files={"file": ("test.jpg", sample_image_bytes)},
+        )
+        assert resp.status_code == 400
+        assert "invalid" in resp.json()["detail"].lower()
+
+    def test_insufficient_points_returns_400(self, client, sample_image_bytes):
+        resp = client.post(
+            "/v1/inpaint?points=[[0,0],[1,1]]",
+            files={"file": ("test.jpg", sample_image_bytes)},
+        )
+        assert resp.status_code == 400
+        assert "at least 3" in resp.json()["detail"].lower()
+
+    def test_oversized_file_returns_413(self, client, oversized_file_bytes):
+        resp = client.post(
+            f"/v1/inpaint?points={self.POINTS}",
+            files={"file": ("big.jpg", oversized_file_bytes)},
+        )
+        assert resp.status_code == 413
+        assert "too large" in resp.json()["detail"].lower()
+
+    def test_503_when_model_missing(self, client, sample_image_bytes):
+        import main
+
+        main.model_registry.pop("inpaint", None)
+        resp = client.post(
+            f"/v1/inpaint?points={self.POINTS}",
+            files={"file": ("test.jpg", sample_image_bytes)},
+        )
+        assert resp.status_code == 503
+        assert "not loaded" in resp.json()["detail"].lower()
+
+    def test_500_on_predict_exception(self, client, sample_image_bytes):
+        import main
+
+        main.model_registry["inpaint"].predict.side_effect = RuntimeError("boom")
+        resp = client.post(
+            f"/v1/inpaint?points={self.POINTS}",
+            files={"file": ("test.jpg", sample_image_bytes)},
+        )
+        assert resp.status_code == 500
+        assert resp.json()["detail"] == "Internal processing error"
+
+
 class TestPipelineEndpoint:
     def test_success_all_steps(self, client, sample_image_bytes):
         resp = client.post("/v1/pipeline", files={"file": ("test.jpg", sample_image_bytes)})
@@ -243,6 +317,15 @@ class TestLegacyRedirects:
         )
         assert resp.status_code == 307
         assert "/v1/old-photo-restore" in resp.headers["location"]
+
+    def test_inpaint_redirect(self, client, sample_image_bytes):
+        resp = client.post(
+            "/inpaint?points=[[0,0],[10,0],[10,10]]",
+            files={"file": ("test.jpg", sample_image_bytes)},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 307
+        assert "/v1/inpaint" in resp.headers["location"]
 
     def test_pipeline_redirect(self, client, sample_image_bytes):
         resp = client.post(

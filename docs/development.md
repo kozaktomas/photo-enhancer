@@ -7,7 +7,7 @@ photo-enhancer/
 ├── main.py                  # FastAPI app, v1 router, endpoints, middleware, model lifecycle
 ├── models/
 │   ├── __init__.py
-│   ├── wrappers.py          # Model wrapper classes (DDColor, NAFNet, CodeFormer, RealESRGAN, OldPhotoRestore)
+│   ├── wrappers.py          # Model wrapper classes (DDColor, NAFNet, CodeFormer, RealESRGAN, LaMa, OldPhotoRestore)
 │   └── archs/               # Vendored PyTorch architecture definitions
 │       ├── __init__.py
 │       ├── rrdbnet_arch.py   #   RRDBNet (Real-ESRGAN)
@@ -321,6 +321,9 @@ curl -X POST "http://localhost:8000/v1/upscale?scale=4&tile_size=512" -F "file=@
 
 # Old photo restore
 curl -X POST http://localhost:8000/v1/old-photo-restore -F "file=@old_photo.jpg" -o output.png
+
+# Inpaint
+curl -g -X POST "http://localhost:8000/v1/inpaint?points=[[100,100],[400,100],[400,400],[100,400]]" -F "file=@photo.jpg" -o output.png
 
 # Pipeline
 curl -X POST "http://localhost:8000/v1/pipeline?width=4000" -F "file=@photo.jpg" -o output.png

@@ -15,6 +15,7 @@ Base URL: `http://localhost:8000`
 | `POST` | `/v1/face-restore` | Enhance and restore faces |
 | `POST` | `/v1/upscale` | Super-resolution upscaling |
 | `POST` | `/v1/old-photo-restore` | Restore old/damaged photos (scratch repair, global restoration, face enhancement) |
+| `POST` | `/v1/inpaint` | Fill polygon regions using LaMa inpainting |
 | `POST` | `/v1/pipeline` | Run multiple enhancement steps in one request |
 
 Interactive docs are available at [`/docs`](http://localhost:8000/docs) (Swagger UI) and [`/redoc`](http://localhost:8000/redoc) (ReDoc).
@@ -39,7 +40,7 @@ curl http://localhost:8000/health
 {
   "status": "healthy",
   "device": "cuda",
-  "loaded_models": ["colorize", "restore", "face", "upscale", "old_photo_restore"],
+  "loaded_models": ["colorize", "restore", "face", "upscale", "old_photo_restore", "inpaint"],
   "cuda_info": {
     "gpu_name": "NVIDIA GeForce RTX 3090",
     "vram_total_gb": 24.0,
@@ -366,6 +367,66 @@ with open("restored.png", "wb") as f:
 
 ---
 
+## POST /v1/inpaint
+
+Fill a polygon-shaped region of an image using the LaMa (Large Mask Inpainting) model. Instead of uploading a separate mask file, you define the inpaint region as a polygon via the `points` query parameter.
+
+**File size limit:** 32 MB maximum.
+
+### Parameters
+
+| Parameter | In | Type | Default | Constraints | Description |
+|---|---|---|---|---|---|
+| `file` | body (form) | file | required | max 32 MB | Input image (JPEG, PNG, WebP, etc.) |
+| `points` | query | string (JSON) | required | At least 3 `[x,y]` pairs | JSON array of `[x,y]` points defining the polygon to inpaint, e.g. `[[10,20],[30,40],[50,60]]` |
+| `output_format` | query | string | `png` | `png`, `jpg`, `jpeg`, `webp` | Output image format |
+
+### Examples
+
+**curl:**
+
+```bash
+# Basic usage — inpaint a rectangular region (-g disables curl's URL globbing for brackets)
+curl -g -X POST "http://localhost:8000/v1/inpaint?points=[[100,100],[400,100],[400,400],[100,400]]" \
+  -F "file=@photo.jpg" \
+  -o inpainted.png
+
+# With WebP output
+curl -g -X POST "http://localhost:8000/v1/inpaint?points=[[100,100],[400,100],[400,400],[100,400]]&output_format=webp" \
+  -F "file=@photo.jpg" \
+  -o inpainted.webp
+```
+
+**Python (requests):**
+
+```python
+import json
+import requests
+
+points = [[100, 100], [400, 100], [400, 400], [100, 400]]
+
+with open("photo.jpg", "rb") as f:
+    resp = requests.post(
+        "http://localhost:8000/v1/inpaint",
+        files={"file": f},
+        params={"points": json.dumps(points), "output_format": "png"},
+    )
+
+resp.raise_for_status()
+with open("inpainted.png", "wb") as f:
+    f.write(resp.content)
+```
+
+### Response
+
+- **200**: Processed image binary (Content-Type matches `output_format`)
+- **400**: Invalid image, invalid points JSON, fewer than 3 points, or parameter error
+- **413**: File too large (exceeds 32 MB)
+- **500**: Processing error
+- **503**: Inpainting model not loaded
+
+---
+
 ## POST /v1/pipeline
 
 Run multiple enhancement steps in a single request. Pipeline order: old_photo_restore -> colorize -> restore -> upscale -> resize -> face restore.
@@ -436,12 +497,15 @@ Common error messages:
 |---|---|---|
 | 400 | `Could not decode image — invalid or unsupported format` | File is not a valid image |
 | 400 | `Unsupported output format: 'bmp'. Supported: png, jpg, webp` | Invalid `output_format` value |
+| 400 | `Invalid points JSON: ...` | `points` param is not valid JSON |
+| 400 | `points must be a JSON array of at least 3 [x,y] pairs` | Fewer than 3 points provided |
 | 413 | `File too large (35.2 MB). Maximum allowed size is 32 MB.` | Upload exceeds 32 MB |
 | 503 | `Colorization model not loaded` | DDColor failed to load at startup |
 | 503 | `Restoration model not loaded` | NAFNet failed to load at startup |
 | 503 | `Face restoration model not loaded` | CodeFormer failed to load at startup |
 | 503 | `Upscale model not loaded` | Real-ESRGAN failed to load at startup |
 | 503 | `Old photo restoration model not loaded` | Old Photo Restore failed to load at startup |
+| 503 | `Inpainting model not loaded` | LaMa failed to load at startup |
 | 500 | `Internal processing error` | Unexpected exception (see server logs) |
 
 ## Output Formats

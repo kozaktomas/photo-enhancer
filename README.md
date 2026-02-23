@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-REST API for AI-powered photo enhancement: colorization, restoration, face restoration, upscaling, and old photo restoration.
+REST API for AI-powered photo enhancement: colorization, restoration, face restoration, upscaling, old photo restoration, and inpainting.
 
 Built with FastAPI and PyTorch. Runs on CUDA GPU or CPU. Vibecoded with [Claude Code](https://claude.ai/code).
 
@@ -18,6 +18,7 @@ Built with FastAPI and PyTorch. Runs on CUDA GPU or CPU. Vibecoded with [Claude 
   - [Face Restore](#face-restore)
   - [Upscale](#upscale)
   - [Old Photo Restore](#old-photo-restore)
+  - [Inpaint](#inpaint)
   - [Pipeline](#pipeline)
   - [HTTP Status Codes](#http-status-codes)
 - [Environment Variables](#environment-variables)
@@ -36,6 +37,7 @@ Built with FastAPI and PyTorch. Runs on CUDA GPU or CPU. Vibecoded with [Claude 
 | `/v1/face-restore` | [CodeFormer](https://github.com/sczhou/CodeFormer) | `v0.1` (default) |
 | `/v1/upscale` | [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) | `x4plus` (default), `x4anime`, `x2plus` |
 | `/v1/old-photo-restore` | [Old Photo Restoration](https://github.com/microsoft/Bringing-Old-Photos-Back-to-Life) | `v1` (default) |
+| `/v1/inpaint` | [LaMa](https://github.com/advimman/lama) | `big` (default) |
 
 Model weights are downloaded automatically on first startup.
 
@@ -96,7 +98,7 @@ Response:
 {
   "status": "healthy",
   "device": "cuda",
-  "loaded_models": ["colorize", "restore", "face", "upscale", "old_photo_restore"],
+  "loaded_models": ["colorize", "restore", "face", "upscale", "old_photo_restore", "inpaint"],
   "cuda_info": {
     "gpu_name": "NVIDIA GeForce RTX 3090",
     "vram_total_gb": 24.0,
@@ -237,6 +239,22 @@ curl -X POST "http://localhost:8000/v1/old-photo-restore?with_scratch=true&with_
 | `scratch_threshold` | float (0.0-1.0) | 0.4 | Sensitivity for scratch detection |
 | `output_format` | string | png | Output format: `png`, `jpg`, `jpeg`, `webp` |
 
+### Inpaint
+
+Fill in a polygon-shaped region of an image (remove objects, repair damage). Define the region to inpaint as polygon points.
+
+```bash
+curl -g -X POST "http://localhost:8000/v1/inpaint?points=[[100,100],[400,100],[400,400],[100,400]]" \
+  -F "file=@photo.jpg" \
+  -o inpainted.png
+```
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `file` | file | required | Input image (max 32 MB) |
+| `points` | string (JSON) | required | JSON array of `[x,y]` points defining the polygon to inpaint (at least 3 points) |
+| `output_format` | string | png | Output format: `png`, `jpg`, `jpeg`, `webp` |
+
 ### Pipeline
 
 Run multiple processing steps in a single request. Order: old_photo_restore -> colorize -> restore -> upscale -> face restore.
@@ -290,6 +308,7 @@ Error responses return JSON:
 | `MODEL_FACE` | `v0.1` | CodeFormer variant (`v0.1`) |
 | `MODEL_UPSCALE` | `x4plus` | Real-ESRGAN variant (`x4plus`, `x4anime`, `x2plus`) |
 | `MODEL_OLD_PHOTO` | `v1` | Old Photo Restore variant (`v1`) |
+| `MODEL_INPAINT` | `big` | LaMa inpainting variant (`big`) |
 | `FORCE_CPU` | `false` | Force CPU inference even if CUDA is available |
 
 ## Testing
@@ -348,7 +367,7 @@ photo-enhancer/
 
 ## Architecture
 
-All five models run real AI inference using vendored PyTorch architectures in `models/archs/`. Model architectures (block counts, widths, scale factors) are inferred from checkpoint keys at load time — no hard-coded config per variant. This means dropping in a different weight file for the same model family will just work.
+All six models run real AI inference using vendored PyTorch architectures in `models/archs/` (except LaMa which uses a TorchScript JIT model). Model architectures (block counts, widths, scale factors) are inferred from checkpoint keys at load time — no hard-coded config per variant. This means dropping in a different weight file for the same model family will just work.
 
 Dependencies:
 - **DDColor**: installed via pip (`ddcolor` package, uses bundled `basicsr==1.3.4.6`)

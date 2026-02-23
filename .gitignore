@@ -17,6 +17,7 @@ weights/
 # Test scripts & output
 test.ps1
 test.sh
+test_inpaint.sh
 test_old_photo_restore.sh
 output/
 test_output/

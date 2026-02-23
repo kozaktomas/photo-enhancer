@@ -11,6 +11,7 @@ services:
       - MODEL_FACE=v0.1
       - MODEL_UPSCALE=x4plus
       - MODEL_OLD_PHOTO=v1
+      - MODEL_INPAINT=big
       - FORCE_CPU=true
 
 volumes:

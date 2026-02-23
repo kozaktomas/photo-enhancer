@@ -5,6 +5,7 @@ face restoration, and upscaling. Models load at startup and are served
 via versioned POST endpoints under ``/v1``.
 """
 
+import json
 import logging
 import os
 import time
@@ -16,6 +17,7 @@ warnings.filterwarnings("ignore", message=".*pretrained.*", category=UserWarning
 warnings.filterwarnings("ignore", message=".*weight enum.*", category=UserWarning)
 
 import cv2  # noqa: E402
+import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from fastapi import APIRouter, FastAPI, File, Query, UploadFile  # noqa: E402
 from fastapi.responses import JSONResponse, RedirectResponse, Response  # noqa: E402
@@ -26,6 +28,7 @@ from starlette.requests import Request  # noqa: E402
 from models.wrappers import (  # noqa: E402
     CodeFormerWrapper,
     DDColorWrapper,
+    LaMaWrapper,
     NAFNetWrapper,
     OldPhotoRestoreWrapper,
     RealESRGANWrapper,
@@ -105,6 +108,11 @@ MODEL_CONFIG = {
         "default": "v1",
         "wrapper": OldPhotoRestoreWrapper,
         "multi_file": True,
+    },
+    "inpaint": {
+        "env_var": "MODEL_INPAINT",
+        "default": "big",
+        "wrapper": LaMaWrapper,
     },
 }
 
@@ -508,6 +516,98 @@ def old_photo_restore(
         return JSONResponse(status_code=500, content={"detail": "Internal processing error"})
 
 
+@v1_router.post("/inpaint")
+def inpaint(
+    file: UploadFile = File(...),
+    points: str = Query(
+        ...,
+        description=(
+            "JSON array of [x,y] points defining the inpaint polygon, "
+            "e.g. [[10,20],[30,40],[50,60]]"
+        ),
+    ),
+    output_format: str = Query("png", pattern="^(png|jpg|jpeg|webp)$"),
+):
+    """Inpaint a polygon-shaped region of an image using the LaMa model.
+
+    The ``points`` query parameter defines a polygon on the image. The polygon
+    interior is filled white to create the inpaint mask.
+
+    Args:
+        file: Input image file (JPEG, PNG, WebP, etc.).
+        points: JSON array of ``[x, y]`` coordinate pairs (at least 3).
+        output_format: Desired output image format.
+
+    Returns:
+        The inpainted image as binary content.
+    """
+    try:
+        file_bytes = file.file.read()
+        check_file_size(file_bytes)
+        image = read_image(file_bytes)
+        image = validate_and_resize(image)
+    except FileTooLargeError as e:
+        return JSONResponse(status_code=413, content={"detail": str(e)})
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+
+    # Parse and validate polygon points
+    try:
+        parsed = json.loads(points)
+    except (json.JSONDecodeError, TypeError) as e:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": f"Invalid points JSON: {e}"},
+        )
+
+    if not isinstance(parsed, list) or len(parsed) < 3:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "points must be a JSON array of at least 3 [x,y] pairs"},
+        )
+
+    for i, pt in enumerate(parsed):
+        if (
+            not isinstance(pt, (list, tuple))
+            or len(pt) != 2
+            or not all(isinstance(v, (int, float)) for v in pt)
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": f"Invalid point at index {i}: expected [x, y] with numeric values"
+                },
+            )
+
+    # Build mask from polygon
+    ih, iw = image.shape[:2]
+    mask_gray = np.zeros((ih, iw), dtype=np.uint8)
+    polygon = np.array(parsed, dtype=np.int32)
+    cv2.fillPoly(mask_gray, [polygon], 255)
+
+    model = get_model("inpaint")
+    if model is None:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Inpainting model not loaded"},
+        )
+
+    try:
+        result = model.predict(image, mask=mask_gray)
+        cuda_clear()
+        output = encode_image(result, output_format)
+        return Response(
+            content=output,
+            media_type=MEDIA_TYPES.get(output_format, "image/png"),
+        )
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"detail": str(e)})
+    except Exception:
+        cuda_clear()
+        logger.exception("Inpaint error")
+        return JSONResponse(status_code=500, content={"detail": "Internal processing error"})
+
+
 @v1_router.post("/pipeline")
 def pipeline(
     file: UploadFile = File(...),
@@ -649,6 +749,7 @@ _LEGACY_PATHS = [
     "/face-restore",
     "/upscale",
     "/old-photo-restore",
+    "/inpaint",
     "/pipeline",
 ]
 

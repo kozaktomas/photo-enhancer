@@ -419,6 +419,90 @@ class CodeFormerWrapper:
         return result
 
 
+class LaMaWrapper:
+    """Wrapper for LaMa inpainting model — real inference.
+
+    Uses a TorchScript JIT model to fill masked regions in an image.
+    """
+
+    def __init__(self, model_path: str, device: str, variant: str = "big") -> None:
+        """Load a LaMa TorchScript checkpoint.
+
+        Args:
+            model_path: Path to the ``.pt`` TorchScript model file.
+            device: Compute device string (``"cuda"``, ``"mps"``, or ``"cpu"``).
+            variant: Model variant name (informational).
+        """
+        self.device = device
+        self.model = torch.jit.load(model_path, map_location=device)
+        self.model.eval()
+        logger.info("LaMaWrapper loaded — %s on %s", model_path, device)
+
+    def predict(self, image: np.ndarray, **kwargs) -> np.ndarray:
+        """Inpaint masked regions of an image.
+
+        Args:
+            image: BGR uint8 numpy array.
+            **kwargs: Required ``mask`` (grayscale uint8 numpy array, 255 = inpaint).
+
+        Returns:
+            Inpainted BGR uint8 numpy array.
+
+        Raises:
+            ValueError: If no mask is provided or mask dimensions don't match.
+        """
+        mask = kwargs.get("mask")
+        if mask is None:
+            raise ValueError("Inpainting requires a mask image")
+
+        h, w = image.shape[:2]
+        mh, mw = mask.shape[:2]
+        if (mh, mw) != (h, w):
+            raise ValueError(f"Mask dimensions ({mw}x{mh}) do not match image dimensions ({w}x{h})")
+
+        # Ensure mask is single-channel
+        if len(mask.shape) == 3:
+            mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+
+        # BGR -> RGB, float32 [0,1]
+        img_rgb = image[:, :, ::-1].astype(np.float32) / 255.0
+        mask_f = mask.astype(np.float32) / 255.0
+
+        # Pad to multiple of 8
+        pad_h = (8 - h % 8) % 8
+        pad_w = (8 - w % 8) % 8
+
+        img_t = torch.from_numpy(img_rgb.copy()).permute(2, 0, 1).unsqueeze(0)
+        mask_t = torch.from_numpy(mask_f.copy()).unsqueeze(0).unsqueeze(0)
+
+        if pad_h > 0 or pad_w > 0:
+            img_t = torch.nn.functional.pad(img_t, (0, pad_w, 0, pad_h), mode="reflect")
+            mask_t = torch.nn.functional.pad(mask_t, (0, pad_w, 0, pad_h), mode="reflect")
+
+        # Binarize mask for model input
+        mask_t = (mask_t > 0.5).float()
+
+        img_t = img_t.to(self.device)
+        mask_t = mask_t.to(self.device)
+
+        with torch.no_grad():
+            output = self.model(img_t, mask_t)
+
+        # Crop padding and convert back
+        output = output[:, :, :h, :w]
+        result = output.squeeze(0).permute(1, 2, 0).cpu().numpy()
+        result = np.clip(result * 255.0, 0, 255).astype(np.uint8)
+
+        # RGB -> BGR
+        result = result[:, :, ::-1].copy()
+
+        # Blend: keep original pixels in non-masked areas
+        mask_3ch = (mask[:, :, np.newaxis] > 127).astype(np.float32)
+        result = (result * mask_3ch + image * (1 - mask_3ch)).astype(np.uint8)
+
+        return result
+
+
 class OldPhotoRestoreWrapper:
     """Wrapper for "Bringing Old Photos Back to Life" restoration pipeline.
 

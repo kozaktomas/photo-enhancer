@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-REST API for AI-powered photo enhancement (colorization, restoration, face restoration, upscaling, old photo restoration) built with FastAPI and PyTorch. Runs on CUDA GPU or CPU.
+REST API for AI-powered photo enhancement (colorization, restoration, face restoration, upscaling, old photo restoration, inpainting) built with FastAPI and PyTorch. Runs on CUDA GPU or CPU.
 
 ## Workflow
 
@@ -53,8 +53,8 @@ API docs are auto-generated at `/docs` (Swagger) and `/redoc`.
 
 ### Key modules
 
-- **`main.py`** — FastAPI app with lifespan startup/shutdown. Holds the global `model_registry` dict and `device` string. All 6 POST endpoints live on a `/v1` router and follow the same pattern: size check, decode image, validate, run model, encode output. Legacy un-prefixed paths redirect with 307. Includes `RequestLoggingMiddleware` for JSON request logging and Prometheus instrumentation via `prometheus-fastapi-instrumentator`.
-- **`models/wrappers.py`** — Wrapper classes (`DDColorWrapper`, `NAFNetWrapper`, `CodeFormerWrapper`, `RealESRGANWrapper`, `OldPhotoRestoreWrapper`). Each takes `(model_path, device, variant)` and exposes `predict(image, **kwargs)` returning a numpy BGR array. NAFNet and RealESRGAN infer their architecture (block counts, width, scale) from checkpoint keys — no hard-coded configs per variant. CodeFormer uses `facexlib` for face detection/alignment. OldPhotoRestoreWrapper uses dlib and is a multi-file model (model_path is a directory).
+- **`main.py`** — FastAPI app with lifespan startup/shutdown. Holds the global `model_registry` dict and `device` string. All 7 POST endpoints live on a `/v1` router and follow the same pattern: size check, decode image, validate, run model, encode output. The `/v1/inpaint` endpoint accepts a `points` query parameter (JSON array of `[x,y]` polygon vertices) instead of a mask file upload — the polygon is rasterized into a binary mask via `cv2.fillPoly()`. Legacy un-prefixed paths redirect with 307. Includes `RequestLoggingMiddleware` for JSON request logging and Prometheus instrumentation via `prometheus-fastapi-instrumentator`.
+- **`models/wrappers.py`** — Wrapper classes (`DDColorWrapper`, `NAFNetWrapper`, `CodeFormerWrapper`, `RealESRGANWrapper`, `LaMaWrapper`, `OldPhotoRestoreWrapper`). Each takes `(model_path, device, variant)` and exposes `predict(image, **kwargs)` returning a numpy BGR array. NAFNet and RealESRGAN infer their architecture (block counts, width, scale) from checkpoint keys — no hard-coded configs per variant. CodeFormer uses `facexlib` for face detection/alignment. LaMaWrapper loads a TorchScript JIT model and requires a mask kwarg. OldPhotoRestoreWrapper uses dlib and is a multi-file model (model_path is a directory).
 - **`models/archs/`** — Vendored PyTorch `nn.Module` architecture definitions (`RRDBNet`, `NAFNet`, `VQAutoEncoder`, `CodeFormer`, `UNet` scratch detection, `GlobalGenerator_DCDCv2`/`Mapping_Model_with_mask_2` VAE+mapping, `SPADEGenerator` face enhancement). These avoid depending on `basicsr>=1.4.2` which would conflict with the DDColor dependency.
 - **`utils/downloader.py`** — `ensure_model_exists(category, variant)` downloads single-file weights from HuggingFace/GitHub/Google Drive into `/app/weights/<category>/` with `.part` file handling. `ensure_model_files_exist(category, variant)` handles multi-file models (e.g. old photo restore with 6 files) and returns a directory path. Google Drive URLs are resolved via `drive.usercontent.google.com` to bypass virus-scan interstitials. Downloaded files are validated to reject corrupt HTML responses.
 - **`utils/image_ops.py`** — `read_image(bytes)`, `validate_and_resize(img)`, `encode_image(img, format)`. All operate on numpy arrays via OpenCV.
@@ -70,7 +70,7 @@ All endpoints follow the same error convention:
 
 ### Model loading
 
-Models load during FastAPI lifespan startup. Variants are selected via environment variables (`MODEL_COLORIZE`, `MODEL_RESTORE`, `MODEL_FACE`, `MODEL_UPSCALE`, `MODEL_OLD_PHOTO`). `FORCE_CPU=true` overrides CUDA detection. Models with `"multi_file": True` in their config use `ensure_model_files_exist()` instead of `ensure_model_exists()`. Models that fail to load are skipped (endpoint returns 503).
+Models load during FastAPI lifespan startup. Variants are selected via environment variables (`MODEL_COLORIZE`, `MODEL_RESTORE`, `MODEL_FACE`, `MODEL_UPSCALE`, `MODEL_OLD_PHOTO`, `MODEL_INPAINT`). `FORCE_CPU=true` overrides CUDA detection. Models with `"multi_file": True` in their config use `ensure_model_files_exist()` instead of `ensure_model_exists()`. Models that fail to load are skipped (endpoint returns 503).
 
 ### Adding a new model
 1. Add a download entry in `utils/downloader.py` model registry (`MODEL_URLS` dict)
@@ -108,6 +108,7 @@ Models load during FastAPI lifespan startup. Variants are selected via environme
 | `MODEL_FACE` | `v0.1` | CodeFormer variant: `v0.1` |
 | `MODEL_UPSCALE` | `x4plus` | Real-ESRGAN variant: `x4plus`, `x4anime`, `x2plus` |
 | `MODEL_OLD_PHOTO` | `v1` | Old Photo Restore variant: `v1` |
+| `MODEL_INPAINT` | `big` | LaMa inpainting variant: `big` |
 | `FORCE_CPU` | `false` | Force CPU even if CUDA is available |
 | `TORCH_HOME` | `/app/weights/.torch` | PyTorch cache directory (set in Dockerfile) |
 | `HF_HOME` | `/app/weights/.huggingface` | HuggingFace cache directory (set in Dockerfile) |

@@ -226,6 +226,40 @@ This is a multi-file model (6 weight files). All hosted on HuggingFace:
 
 ---
 
+## LaMa (Inpainting)
+
+**Endpoint:** `POST /inpaint`
+**Paper:** [Resolution-robust Large Mask Inpainting with Fourier Convolutions](https://arxiv.org/abs/2109.07161) (WACV 2022)
+**Repository:** [github.com/advimman/lama](https://github.com/advimman/lama)
+
+LaMa (Large Mask Inpainting) fills in arbitrary masked regions of an image with realistic content. It uses Fast Fourier Convolutions (FFC) to capture global image context, enabling it to fill large missing areas convincingly — unlike patch-based methods that struggle with large holes.
+
+### Variants
+
+| Variant | Env value | Description |
+|---|---|---|
+| `big` | `MODEL_INPAINT=big` | **Default.** The "big-lama" checkpoint (~206 MB). |
+
+### Parameters
+
+The inpaint endpoint accepts a **`points`** query parameter (JSON array of `[x,y]` polygon vertices, at least 3). The polygon interior is rasterized into a binary mask where white (255) = inpaint, black (0) = keep.
+
+### Weight Sources
+
+| Variant | URL |
+|---|---|
+| `big` | `huggingface.co/JosephCatrambone/big-lama-torchscript/.../lama.pt` |
+
+### Technical Notes
+
+- **TorchScript JIT model**: Loaded with `torch.jit.load()` — no architecture vendoring needed, no new pip dependencies
+- **FFC architecture**: Uses Fast Fourier Convolutions for global receptive field, enabling coherent filling of large masked regions
+- **Pad-to-8**: Input is padded to a multiple of 8 pixels (reflected padding) before inference, then cropped back
+- **Input format**: 4-channel tensor — image (3ch RGB) + binary mask (1ch) concatenated along channel dimension
+- **Blending**: Output is blended with the original image — only masked regions use the model output, non-masked regions keep original pixels
+
+---
+
 ## Weight Download & Caching
 
 ### Download Process
@@ -248,6 +282,8 @@ This is a multi-file model (6 weight files). All hosted on HuggingFace:
 │   └── codeformer.pth
 ├── upscale/
 │   └── RealESRGAN_x4plus.pth
+├── inpaint/
+│   └── big-lama.pt
 ├── old_photo_restore/         # Multi-file model (6 weight files)
 │   ├── scratch_detection.pt
 │   ├── vae_a_encoder.pth

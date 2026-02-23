@@ -24,6 +24,9 @@ MODEL_URLS: dict[str, dict[str, str]] = {
         "x4anime": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth",
         "x2plus": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
     },
+    "inpaint": {
+        "big": "https://huggingface.co/JosephCatrambone/big-lama-torchscript/resolve/main/lama.pt",
+    },
 }
 
 MODEL_URLS_MULTI: dict[str, dict[str, dict[str, str]]] = {
